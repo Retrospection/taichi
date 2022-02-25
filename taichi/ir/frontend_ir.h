@@ -7,11 +7,20 @@
 #include "taichi/ir/stmt_op_types.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/expression.h"
-#include "taichi/program/arch.h"
+#include "taichi/backends/arch.h"
 #include "taichi/program/function.h"
 #include "taichi/ir/mesh.h"
 
 TLANG_NAMESPACE_BEGIN
+
+struct ForLoopConfig {
+  int bit_vectorize{0};
+  int num_cpu_threads{0};
+  bool strictly_serialized{false};
+  MemoryAccessOptions mem_access_opt;
+  int block_dim{0};
+  bool uniform{false};
+};
 
 // Frontend Statements
 class FrontendExternalFuncStmt : public Stmt {
@@ -173,30 +182,19 @@ class FrontendForStmt : public Stmt {
   FrontendForStmt(const ExprGroup &loop_var,
                   const Expr &global_var,
                   Arch arch,
-                  int bit_vectorize,
-                  int num_cpu_threads,
-                  bool strictly_serialized,
-                  int block_dim,
-                  MemoryAccessOptions &&mem_access_opt);
+                  const ForLoopConfig &config);
 
   FrontendForStmt(const ExprGroup &loop_var,
                   const mesh::MeshPtr &mesh,
                   const mesh::MeshElementType &element_type,
                   Arch arch,
-                  int bit_vectorize,
-                  int num_cpu_threads,
-                  int block_dim,
-                  MemoryAccessOptions &&mem_access_opt);
+                  const ForLoopConfig &config);
 
   FrontendForStmt(const Expr &loop_var,
                   const Expr &begin,
                   const Expr &end,
                   Arch arch,
-                  int bit_vectorize,
-                  int num_cpu_threads,
-                  bool strictly_serialized,
-                  int block_dim,
-                  MemoryAccessOptions &&mem_access_opt);
+                  const ForLoopConfig &config);
 
   bool is_container_statement() const override {
     return true;
@@ -424,12 +422,24 @@ class ExternalTensorExpression : public Expression {
   int element_dim;  // 0: scalar; 1: vector (SOA); 2: matrix (SOA); -1: vector
                     // (AOS); -2: matrix (AOS)
 
+  // Fill element shape if compile-time specialization is desired.
+  std::vector<int> element_shape;
+
   ExternalTensorExpression(const DataType &dt,
                            int dim,
                            int arg_id,
                            int element_dim)
       : dt(dt), dim(dim), arg_id(arg_id), element_dim(element_dim) {
     set_attribute("dim", std::to_string(dim));
+  }
+
+  ExternalTensorExpression(const DataType &dt,
+                           int dim,
+                           int arg_id,
+                           int element_dim,
+                           const std::vector<int> &element_shape)
+      : ExternalTensorExpression(dt, dim, arg_id, element_dim) {
+    this->element_shape = element_shape;
   }
 
   void type_check(CompileConfig *config) override {
@@ -814,24 +824,19 @@ class ASTBuilder {
 
   class ForLoopDecoratorRecorder {
    public:
-    int bit_vectorize;
-    int num_cpu_threads;
-    bool strictly_serialized;
-    MemoryAccessOptions mem_access_opt;
-    int block_dim;
-    bool uniform;
+    ForLoopConfig config;
 
     ForLoopDecoratorRecorder() {
       reset();
     }
 
     void reset() {
-      bit_vectorize = -1;
-      num_cpu_threads = 0;
-      uniform = false;
-      mem_access_opt.clear();
-      block_dim = 0;
-      strictly_serialized = false;
+      config.bit_vectorize = -1;
+      config.num_cpu_threads = 0;
+      config.uniform = false;
+      config.mem_access_opt.clear();
+      config.block_dim = 0;
+      config.strictly_serialized = false;
     }
   };
 
@@ -900,24 +905,24 @@ class ASTBuilder {
   void pop_scope();
 
   void bit_vectorize(int v) {
-    for_loop_dec_.bit_vectorize = v;
+    for_loop_dec_.config.bit_vectorize = v;
   }
 
   void parallelize(int v) {
-    for_loop_dec_.num_cpu_threads = v;
+    for_loop_dec_.config.num_cpu_threads = v;
   }
 
   void strictly_serialize() {
-    for_loop_dec_.strictly_serialized = true;
+    for_loop_dec_.config.strictly_serialized = true;
   }
 
   void block_dim(int v) {
     TI_ASSERT(bit::is_power_of_two(v));
-    for_loop_dec_.block_dim = v;
+    for_loop_dec_.config.block_dim = v;
   }
 
   void insert_snode_access_flag(SNodeAccessFlag v, const Expr &field) {
-    for_loop_dec_.mem_access_opt.add_flag(field.snode(), v);
+    for_loop_dec_.config.mem_access_opt.add_flag(field.snode(), v);
   }
 
   void reset_snode_access_flag() {
