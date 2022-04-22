@@ -11,6 +11,7 @@ check_in_docker() {
 }
 
 export TI_SKIP_VERSION_CHECK=ON
+export TI_CI=1
 export TI_IN_DOCKER=$(check_in_docker)
 
 if [[ "$TI_IN_DOCKER" == "true" ]]; then
@@ -20,7 +21,7 @@ fi
 python3 -m pip install dist/*.whl
 if [ -z "$GPU_TEST" ]; then
     python3 -m pip install -r requirements_test.txt
-    python3 -m pip install torch
+    python3 -m pip install "torch; python_version < '3.10'"
 else
     ## Only GPU machine uses system python.
     export PATH=$PATH:$HOME/.local/bin
@@ -35,9 +36,18 @@ TI_PATH=$(python3 -c "import taichi;print(taichi.__path__[0])" | tail -1)
 TI_LIB_DIR="$TI_PATH/_lib/runtime" ./build/taichi_cpp_tests
 
 if [ -z "$GPU_TEST" ]; then
-    python3 tests/run_tests.py -vr2 -t4 -a "$TI_WANTED_ARCHS"
+    if [[ $PLATFORM == *"m1"* ]]; then
+	# Split per arch to avoid flaky test
+        python3 tests/run_tests.py -vr2 -t4 -k "not torch" -a cpu
+        # Run metal and vulkan separately so that they don't use M1 chip simultaneously.
+        python3 tests/run_tests.py -vr2 -t4 -k "not torch" -a vulkan
+        python3 tests/run_tests.py -vr2 -t2 -k "not torch" -a metal
+        python3 tests/run_tests.py -vr2 -t1 -k "torch" -a "$TI_WANTED_ARCHS"
+    else
+        python3 tests/run_tests.py -vr2 -t4 -a "$TI_WANTED_ARCHS"
+    fi
 else
-    # only split per arch for self_hosted GPU tests
+    # Split per arch to increase parallelism for linux GPU tests
     if [[ $TI_WANTED_ARCHS == *"cuda"* ]]; then
         python3 tests/run_tests.py -vr2 -t4 -k "not torch" -a cuda
     fi
@@ -49,10 +59,6 @@ else
     fi
     if [[ $TI_WANTED_ARCHS == *"opengl"* ]]; then
         python3 tests/run_tests.py -vr2 -t4 -k "not torch" -a opengl
-    fi
-    # Run metal and vulkan separately so that they don't use M1 chip simultaneously.
-    if [[ $TI_WANTED_ARCHS == *"metal"* ]]; then
-        python3 tests/run_tests.py -vr2 -t4 -k "not torch" -a metal
     fi
     python3 tests/run_tests.py -vr2 -t1 -k "torch" -a "$TI_WANTED_ARCHS"
 fi

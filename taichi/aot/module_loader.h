@@ -1,6 +1,10 @@
 #pragma once
 
+#include <any>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "taichi/aot/module_data.h"
@@ -11,23 +15,118 @@
 namespace taichi {
 namespace lang {
 
-class AotModuleLoader {
+struct RuntimeContext;
+
+namespace aot {
+
+class TI_DLL_EXPORT Field {
  public:
-  virtual ~AotModuleLoader() = default;
+  // Rule of 5 to make MSVC happy
+  Field() = default;
+  virtual ~Field() = default;
+  Field(const Field &) = delete;
+  Field &operator=(const Field &) = delete;
+  Field(Field &&) = default;
+  Field &operator=(Field &&) = default;
+};
 
-  // TODO: Add method get_kernel(...) once the kernel field data will be
-  // generic/common across all backends.
+class TI_DLL_EXPORT Kernel {
+ public:
+  // Rule of 5 to make MSVC happy
+  Kernel() = default;
+  virtual ~Kernel() = default;
+  Kernel(const Kernel &) = delete;
+  Kernel &operator=(const Kernel &) = delete;
+  Kernel(Kernel &&) = default;
+  Kernel &operator=(Kernel &&) = default;
 
-  virtual bool get_field(const std::string &name,
-                         aot::CompiledFieldData &field) = 0;
+  /**
+   * @brief Launches the kernel to the device
+   *
+   * This does not manage the device to host synchronization.
+   *
+   * @param ctx Host context
+   */
+  virtual void launch(RuntimeContext *ctx) = 0;
+};
 
+class TI_DLL_EXPORT KernelTemplateArg {
+ public:
+  using ArgUnion = std::variant<bool, int64_t, uint64_t, const Field *>;
+  template <typename T>
+  KernelTemplateArg(const std::string &name, T &&arg)
+      : name_(name), targ_(std::forward<T>(arg)) {
+  }
+
+ private:
+  std::string name_;
+  /**
+   * @brief Template arg
+   *
+   */
+  ArgUnion targ_;
+};
+
+class TI_DLL_EXPORT KernelTemplate {
+ public:
+  // Rule of 5 to make MSVC happy
+  KernelTemplate() = default;
+  virtual ~KernelTemplate() = default;
+  KernelTemplate(const KernelTemplate &) = delete;
+  KernelTemplate &operator=(const KernelTemplate &) = delete;
+  KernelTemplate(KernelTemplate &&) = default;
+  KernelTemplate &operator=(KernelTemplate &&) = default;
+
+  Kernel *get_kernel(const std::vector<KernelTemplateArg> &template_args);
+
+ protected:
+  virtual std::unique_ptr<Kernel> make_new_kernel(
+      const std::vector<KernelTemplateArg> &template_args) = 0;
+
+ private:
+  std::unordered_map<std::string, std::unique_ptr<Kernel>> loaded_kernels_;
+};
+
+class TI_DLL_EXPORT Module {
+ public:
+  // Rule of 5 to make MSVC happy
+  Module() = default;
+  virtual ~Module() = default;
+  Module(const Module &) = delete;
+  Module &operator=(const Module &) = delete;
+  Module(Module &&) = default;
+  Module &operator=(Module &&) = default;
+
+  static std::unique_ptr<Module> load(Arch arch, std::any mod_params);
+
+  // Module metadata
+  // TODO: Instead of virtualize these simple properties, just store them as
+  // member variables.
+  virtual Arch arch() const = 0;
+  virtual uint64_t version() const = 0;
   virtual size_t get_root_size() const = 0;
+
+  Kernel *get_kernel(const std::string &name);
+  KernelTemplate *get_kernel_template(const std::string &name);
+  Field *get_field(const std::string &name);
+
+ protected:
+  virtual std::unique_ptr<Kernel> make_new_kernel(const std::string &name) = 0;
+  virtual std::unique_ptr<KernelTemplate> make_new_kernel_template(
+      const std::string &name) = 0;
+  virtual std::unique_ptr<Field> make_new_field(const std::string &name) = 0;
+
+ private:
+  std::unordered_map<std::string, std::unique_ptr<Kernel>> loaded_kernels_;
+  std::unordered_map<std::string, std::unique_ptr<KernelTemplate>>
+      loaded_kernel_templates_;
+  std::unordered_map<std::string, std::unique_ptr<Field>> loaded_fields_;
 };
 
 // Only responsible for reporting device capabilities
-class AotTargetDevice : public Device {
+class TargetDevice : public Device {
  public:
-  AotTargetDevice(Arch arch) {
+  TargetDevice(Arch arch) {
     // TODO: make this configurable
     set_default_caps(arch);
   }
@@ -69,5 +168,6 @@ class AotTargetDevice : public Device {
   }
 };
 
+}  // namespace aot
 }  // namespace lang
 }  // namespace taichi

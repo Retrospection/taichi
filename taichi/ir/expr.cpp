@@ -6,17 +6,6 @@
 
 TLANG_NAMESPACE_BEGIN
 
-void Expr::serialize(std::ostream &ss) const {
-  TI_ASSERT(expr);
-  expr->serialize(ss);
-}
-
-std::string Expr::serialize() const {
-  std::stringstream ss;
-  serialize(ss);
-  return ss.str();
-}
-
 void Expr::set_tb(const std::string &tb) {
   expr->tb = tb;
 }
@@ -37,19 +26,6 @@ void Expr::type_check(CompileConfig *config) {
   expr->type_check(config);
 }
 
-Expr select(const Expr &cond, const Expr &true_val, const Expr &false_val) {
-  return Expr::make<TernaryOpExpression>(TernaryOpType::select, cond, true_val,
-                                         false_val);
-}
-
-Expr operator-(const Expr &expr) {
-  return Expr::make<UnaryOpExpression>(UnaryOpType::neg, expr);
-}
-
-Expr operator~(const Expr &expr) {
-  return Expr::make<UnaryOpExpression>(UnaryOpType::bit_not, expr);
-}
-
 Expr cast(const Expr &input, DataType dt) {
   return Expr::make<UnaryOpExpression>(UnaryOpType::cast_value, input, dt);
 }
@@ -68,13 +44,6 @@ Expr &Expr::operator=(const Expr &o) {
   return *this;
 }
 
-Expr Expr::parent() const {
-  TI_ASSERT_INFO(is<GlobalVariableExpression>(),
-                 "Cannot get snode parent of non-global variables.");
-  return Expr::make<GlobalVariableExpression>(
-      cast<GlobalVariableExpression>()->snode->parent);
-}
-
 SNode *Expr::snode() const {
   TI_ASSERT_INFO(is<GlobalVariableExpression>(),
                  "Cannot get snode of non-global variables.");
@@ -85,12 +54,12 @@ Expr Expr::operator!() {
   return Expr::make<UnaryOpExpression>(UnaryOpType::logic_not, expr);
 }
 
-void Expr::declare(DataType dt) {
-  set(Expr::make<GlobalVariableExpression>(dt, Identifier()));
-}
-
 void Expr::set_grad(const Expr &o) {
   this->cast<GlobalVariableExpression>()->adjoint.set(o);
+}
+
+Expr::Expr(int16 x) : Expr() {
+  expr = std::make_shared<ConstExpression>(PrimitiveType::i16, x);
 }
 
 Expr::Expr(int32 x) : Expr() {
@@ -113,4 +82,47 @@ Expr::Expr(const Identifier &id) : Expr() {
   expr = std::make_shared<IdExpression>(id);
 }
 
+Expr expr_rand(DataType dt) {
+  return Expr::make<RandExpression>(dt);
+}
+
+Expr snode_append(SNode *snode, const ExprGroup &indices, const Expr &val) {
+  return Expr::make<SNodeOpExpression>(snode, SNodeOpType::append, indices,
+                                       val);
+}
+
+Expr snode_append(const Expr &expr, const ExprGroup &indices, const Expr &val) {
+  return snode_append(expr.snode(), indices, val);
+}
+
+Expr snode_is_active(SNode *snode, const ExprGroup &indices) {
+  return Expr::make<SNodeOpExpression>(snode, SNodeOpType::is_active, indices);
+}
+
+Expr snode_length(SNode *snode, const ExprGroup &indices) {
+  return Expr::make<SNodeOpExpression>(snode, SNodeOpType::length, indices);
+}
+
+Expr snode_get_addr(SNode *snode, const ExprGroup &indices) {
+  return Expr::make<SNodeOpExpression>(snode, SNodeOpType::get_addr, indices);
+}
+
+Expr snode_length(const Expr &expr, const ExprGroup &indices) {
+  return snode_length(expr.snode(), indices);
+}
+
+Expr assume_range(const Expr &expr, const Expr &base, int low, int high) {
+  return Expr::make<RangeAssumptionExpression>(expr, base, low, high);
+}
+
+Expr loop_unique(const Expr &input, const std::vector<SNode *> &covers) {
+  return Expr::make<LoopUniqueExpression>(input, covers);
+}
+
+Expr global_new(Expr id_expr, DataType dt) {
+  TI_ASSERT(id_expr.is<IdExpression>());
+  auto ret = Expr(std::make_shared<GlobalVariableExpression>(
+      dt, id_expr.cast<IdExpression>()->id));
+  return ret;
+}
 TLANG_NAMESPACE_END

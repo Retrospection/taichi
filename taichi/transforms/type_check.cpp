@@ -4,10 +4,13 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
-#include "taichi/ir/visitors.h"
-#include "taichi/ir/frontend.h"
+#include "taichi/ir/frontend_ir.h"
 
 TLANG_NAMESPACE_BEGIN
+
+static_assert(
+    sizeof(real) == sizeof(float32),
+    "Please build the taichi compiler with single precision (TI_USE_DOUBLE=0)");
 
 // "Type" here does not include vector width
 // Var lookup and Type inference
@@ -212,16 +215,14 @@ class TypeCheck : public IRVisitor {
       // Casting from compute_type to physical_type is handled in codegen.
       dst_value_type = dst_value_type->get_compute_type();
     }
-    auto promoted = promoted_type(dst_value_type, stmt->val->ret_type);
-    auto input_type = stmt->val->ret_data_type_name();
     if (dst_value_type != stmt->val->ret_type) {
+      auto promoted = promoted_type(dst_value_type, stmt->val->ret_type);
+      if (dst_value_type != promoted) {
+        TI_WARN("[{}] Global store may lose precision: {} <- {}, at\n{}",
+                stmt->name(), dst_value_type->to_string(),
+                stmt->val->ret_data_type_name(), stmt->tb);
+      }
       stmt->val = insert_type_cast_before(stmt, stmt->val, dst_value_type);
-    }
-    // TODO: do not use "promoted" here since u8 + u8 = i32 in C++ and storing
-    // u8 to u8 leads to extra warnings.
-    if (dst_value_type != promoted && dst_value_type != stmt->val->ret_type) {
-      TI_WARN("[{}] Global store may lose precision: {} <- {}, at\n{}",
-              stmt->name(), dst_value_type->to_string(), input_type, stmt->tb);
     }
   }
 
@@ -255,6 +256,7 @@ class TypeCheck : public IRVisitor {
           stmt->op_type == UnaryOpType::exp ||
           stmt->op_type == UnaryOpType::log) {
         cast(stmt->operand, config_.default_fp);
+        stmt->ret_type = config_.default_fp;
       }
     }
   }
@@ -409,7 +411,6 @@ class TypeCheck : public IRVisitor {
 
   void visit(ReturnStmt *stmt) override {
     // TODO: Support stmt->ret_id?
-    stmt->ret_type = stmt->values[0]->ret_type;
     TI_ASSERT(stmt->width() == 1);
   }
 

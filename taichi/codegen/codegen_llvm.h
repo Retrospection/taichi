@@ -20,8 +20,8 @@ class OffloadedTask {
   using task_fp_type = int32 (*)(void *);
   task_fp_type func;
 
-  int block_dim;
-  int grid_dim;
+  int block_dim{0};
+  int grid_dim{0};
 
   OffloadedTask(CodeGenLLVM *codegen);
 
@@ -39,7 +39,7 @@ class FunctionCreationGuard {
   CodeGenLLVM *mb;
   llvm::Function *old_func;
   llvm::Function *body;
-  llvm::BasicBlock *old_entry, *allocas, *entry;
+  llvm::BasicBlock *old_entry, *allocas, *entry, *old_final, *final;
   llvm::IRBuilder<>::InsertPoint ip;
 
   FunctionCreationGuard(CodeGenLLVM *mb, std::vector<llvm::Type *> arguments);
@@ -49,8 +49,6 @@ class FunctionCreationGuard {
 
 class CodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
  public:
-  static uint64 task_counter;
-
   Kernel *kernel;
   IRNode *ir;
   Program *prog;
@@ -73,9 +71,13 @@ class CodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
   std::unique_ptr<OffloadedTask> current_task;
   std::vector<OffloadedTask> offloaded_tasks;
   llvm::BasicBlock *func_body_bb;
+  llvm::BasicBlock *final_block;
   std::set<std::string> linked_modules;
+  bool returned{false};
 
   std::unordered_map<const Stmt *, std::vector<llvm::Value *>> loop_vars_llvm;
+
+  std::unordered_map<Function *, llvm::Function *> func_map;
 
   using IRVisitor::visit;
   using LLVMModuleBuilder::call;
@@ -125,6 +127,10 @@ class CodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
   virtual FunctionType compile_module_to_executable();
 
   virtual FunctionType gen();
+
+  virtual bool supports_offline_cache() const {
+    return false;
+  }
 
   // For debugging only
   virtual llvm::Value *create_print(std::string tag,
@@ -380,7 +386,15 @@ class CodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
       llvm::Value *val,
       std::function<llvm::Value *(llvm::Value *, llvm::Value *)> op);
 
+  void visit(FuncCallStmt *stmt) override;
+
+  llvm::Value *bitcast_from_u64(llvm::Value *val, DataType type);
+  llvm::Value *bitcast_to_u64(llvm::Value *val, DataType type);
+
   ~CodeGenLLVM() override = default;
+
+ private:
+  void cache_module(const std::string &kernel_key);
 };
 
 TLANG_NAMESPACE_END

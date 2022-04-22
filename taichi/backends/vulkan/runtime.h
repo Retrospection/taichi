@@ -64,7 +64,7 @@ class CompiledTaichiKernel {
   TaichiKernelAttributes ti_kernel_attribs_;
   std::vector<TaskAttributes> tasks_attribs_;
 
-  Device *device_;
+  [[maybe_unused]] Device *device_;
 
   InputBuffersMap input_buffers_;
 
@@ -104,12 +104,16 @@ class TI_DLL_EXPORT VkRuntime {
 
   Device *get_ti_device() const;
 
+  void add_root_buffer(size_t root_buffer_size);
+
+  DeviceAllocation *get_root_buffer(int id) const;
+
+  size_t get_root_buffer_size(int id) const;
+
  private:
   friend class taichi::lang::vulkan::SNodeTreeManager;
 
   void init_nonroot_buffers();
-
-  void add_root_buffer(size_t root_buffer_size);
 
   Device *device_{nullptr};
   uint64_t *const host_result_buffer_;
@@ -125,6 +129,8 @@ class TI_DLL_EXPORT VkRuntime {
   high_res_clock::time_point current_cmdlist_pending_since_;
 
   std::vector<std::unique_ptr<CompiledTaichiKernel>> ti_kernels_;
+
+  std::unordered_map<DeviceAllocation *, size_t> root_buffers_size_map_;
 };
 
 VkRuntime::RegisterParams run_codegen(

@@ -47,6 +47,7 @@ void full_simplify(IRNode *root,
                    const CompileConfig &config,
                    const FullSimplifyPass::Args &args);
 void print(IRNode *root, std::string *output = nullptr);
+void gen_offline_cache_key(Program *program, IRNode *root, std::string *output);
 void frontend_type_check(IRNode *root);
 void lower_ast(IRNode *root);
 void type_check(IRNode *root, const CompileConfig &config);
@@ -173,12 +174,12 @@ void compile_to_executable(IRNode *ir,
                            bool start_from_ast = true);
 // Compile a function with some basic optimizations, so that the number of
 // statements is reduced before inlining.
-void compile_inline_function(IRNode *ir,
-                             const CompileConfig &config,
-                             Function *func,
-                             bool grad,
-                             bool verbose,
-                             bool start_from_ast);
+void compile_function(IRNode *ir,
+                      const CompileConfig &config,
+                      Function *func,
+                      bool grad,
+                      bool verbose,
+                      bool start_from_ast);
 }  // namespace irpass
 
 TLANG_NAMESPACE_END

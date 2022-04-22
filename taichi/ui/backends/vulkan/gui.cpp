@@ -23,7 +23,7 @@ Gui::Gui(AppContext *app_context, SwapChain *swap_chain, TaichiWindow *window) {
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
-  ImGuiIO &io = ImGui::GetIO();
+  [[maybe_unused]] ImGuiIO &io = ImGui::GetIO();
 
   ImGui::StyleColorsDark();
 
@@ -92,7 +92,7 @@ void Gui::create_descriptor_pool() {
   pool_info.maxSets = 1000 * IM_ARRAYSIZE(pool_sizes);
   pool_info.poolSizeCount = (uint32_t)IM_ARRAYSIZE(pool_sizes);
   pool_info.pPoolSizes = pool_sizes;
-  VkResult err =
+  [[maybe_unused]] VkResult err =
       vkCreateDescriptorPool(app_context_->device().vk_device(), &pool_info,
                              VK_NULL_HANDLE, &descriptor_pool_);
 }
@@ -198,7 +198,9 @@ void Gui::cleanup_render_resources() {
   vkDestroyDescriptorPool(app_context_->device().vk_device(), descriptor_pool_,
                           nullptr);
 
-  ImGui_ImplVulkan_Shutdown();
+  if (initialized()) {
+    ImGui_ImplVulkan_Shutdown();
+  }
   render_pass_ = VK_NULL_HANDLE;
 }
 

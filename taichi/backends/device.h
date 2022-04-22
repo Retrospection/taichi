@@ -9,6 +9,8 @@
 namespace taichi {
 namespace lang {
 
+constexpr size_t kBufferSizeEntireSize = size_t(-1);
+
 // For backend dependent code (e.g. codegen)
 // Or the backend runtime itself
 // Capabilities are per-device
@@ -46,6 +48,21 @@ enum class DeviceCapability : uint32_t {
   wide_lines
 };
 
+enum class BlendOp : uint32_t { add, subtract, reverse_subtract, min, max };
+
+enum class BlendFactor : uint32_t {
+  zero,
+  one,
+  src_color,
+  one_minus_src_color,
+  dst_color,
+  one_minus_dst_color,
+  src_alpha,
+  one_minus_src_alpha,
+  dst_alpha,
+  one_minus_dst_alpha
+};
+
 class Device;
 struct DeviceAllocation;
 struct DevicePtr;
@@ -53,9 +70,12 @@ struct LLVMRuntime;
 
 // TODO: Figure out how to support images. Temporary solutions is to have all
 // opque types such as images work as an allocation
-struct DeviceAllocation {
+using DeviceAllocationId = uint32_t;
+
+struct TI_DLL_EXPORT DeviceAllocation {
   Device *device{nullptr};
-  uint32_t alloc_id{0};
+  DeviceAllocationId alloc_id{0};
+  // TODO: Shall we include size here?
 
   DevicePtr get_ptr(uint64_t offset = 0) const;
 
@@ -68,14 +88,14 @@ struct DeviceAllocation {
   }
 };
 
-struct DeviceAllocationGuard : public DeviceAllocation {
+struct TI_DLL_EXPORT DeviceAllocationGuard : public DeviceAllocation {
   DeviceAllocationGuard(DeviceAllocation alloc) : DeviceAllocation(alloc) {
   }
   DeviceAllocationGuard(const DeviceAllocationGuard &) = delete;
   ~DeviceAllocationGuard();
 };
 
-struct DevicePtr : public DeviceAllocation {
+struct TI_DLL_EXPORT DevicePtr : public DeviceAllocation {
   uint64_t offset{0};
 
   bool operator==(const DevicePtr &other) const {
@@ -163,7 +183,14 @@ enum class PipelineStageType {
   raytracing
 };
 
+// FIXME: Drop the plural form?
 enum class TopologyType : int { Triangles = 0, Lines = 1, Points = 2 };
+
+enum class PolygonMode : int {
+  Fill = 0,
+  Line = 1,
+  Point = 2,
+};
 
 enum class BufferFormat : uint32_t {
   r8,
@@ -274,6 +301,17 @@ class CommandList {
   virtual void buffer_copy(DevicePtr dst, DevicePtr src, size_t size) = 0;
   virtual void buffer_fill(DevicePtr ptr, size_t size, uint32_t data) = 0;
   virtual void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) = 0;
+
+  struct ComputeSize {
+    uint32_t x{0};
+    uint32_t y{0};
+    uint32_t z{0};
+  };
+  // Some GPU APIs can set the block (workgroup, threadsgroup) size at
+  // dispatch time.
+  virtual void dispatch(ComputeSize grid_size, ComputeSize block_size) {
+    dispatch(grid_size.x, grid_size.y, grid_size.z);
+  }
 
   // These are not implemented in compute only device
   virtual void begin_renderpass(int x0,
@@ -394,24 +432,9 @@ class Device {
     AllocUsage usage{AllocUsage::Storage};
   };
 
-  struct LlvmRuntimeAllocParams : AllocParams {
-    bool use_cached{true};
-    JITModule *runtime_jit{nullptr};
-    LLVMRuntime *runtime{nullptr};
-    uint64 *result_buffer{nullptr};
-  };
-
   virtual DeviceAllocation allocate_memory(const AllocParams &params) = 0;
 
-  virtual DeviceAllocation allocate_memory_runtime(
-      const LlvmRuntimeAllocParams &params) {
-    TI_NOT_IMPLEMENTED
-  }
-
   virtual void dealloc_memory(DeviceAllocation handle) = 0;
-
-  uint64_t *allocate_llvm_runtime_memory_jit(
-      const LlvmRuntimeAllocParams &params);
 
   virtual uint64_t get_memory_physical_pointer(DeviceAllocation handle) {
     TI_NOT_IMPLEMENTED
@@ -430,6 +453,9 @@ class Device {
   virtual uint64 fetch_result_uint64(int i, uint64 *result_buffer) {
     TI_NOT_IMPLEMENTED
   }
+
+  // Each thraed will acquire its own stream
+  virtual Stream *get_compute_stream() = 0;
 
   // Mapping can fail and will return nullptr
   virtual void *map_range(DevicePtr ptr, uint64_t size) = 0;
@@ -462,9 +488,6 @@ class Device {
                               void *host_buffer,
                               DevicePtr src,
                               uint64_t size);
-
-  // Each thraed will acquire its own stream
-  virtual Stream *get_compute_stream() = 0;
 
  private:
   std::unordered_map<DeviceCapability, uint32_t> caps_;
@@ -521,12 +544,26 @@ struct ImageParams {
   bool export_sharing{false};
 };
 
+struct BlendFunc {
+  BlendOp op{BlendOp::add};
+  BlendFactor src_factor{BlendFactor::src_alpha};
+  BlendFactor dst_factor{BlendFactor::one_minus_src_alpha};
+};
+
+struct BlendingParams {
+  bool enable{true};
+  BlendFunc color;
+  BlendFunc alpha;
+};
+
 struct RasterParams {
-  TopologyType prim_topology;
+  TopologyType prim_topology{TopologyType::Triangles};
+  PolygonMode polygon_mode{PolygonMode::Fill};
   bool front_face_cull{false};
   bool back_face_cull{false};
   bool depth_test{false};
   bool depth_write{false};
+  std::vector<BlendingParams> blending{};
 };
 
 class GraphicsDevice : public Device {

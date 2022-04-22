@@ -3,15 +3,15 @@
 
 #include "taichi/backends/cuda/cuda_driver.h"
 #include "taichi/backends/arch.h"
+#include "taichi/llvm/llvm_offline_cache.h"
 #include "taichi/platform/cuda/detect_cuda.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/runtime/llvm/mem_request.h"
 #include "taichi/util/str.h"
 #include "taichi/codegen/codegen.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/transforms.h"
 #include "taichi/backends/cpu/cpu_device.h"
-#include "taichi/backends/cuda/cuda_device.h"
-
 #include "taichi/backends/cuda/cuda_device.h"
 
 #if defined(TI_WITH_CUDA)
@@ -131,9 +131,6 @@ void LlvmProgramImpl::maybe_initialize_cuda_llvm_context() {
 
 FunctionType LlvmProgramImpl::compile(Kernel *kernel,
                                       OffloadedStmt *offloaded) {
-  if (!kernel->lowered()) {
-    kernel->lower();
-  }
   auto codegen = KernelCodeGen::create(kernel->arch, kernel, offloaded);
   return codegen->codegen();
 }
@@ -184,6 +181,15 @@ void LlvmProgramImpl::initialize_llvm_runtime_snodes(const SNodeTree *tree,
   Ptr root_buffer = snode_tree_buffer_manager_->allocate(
       runtime_jit, llvm_runtime_, rounded_size, taichi_page_size, tree->id(),
       result_buffer);
+  if (config->arch == Arch::cuda) {
+#if defined(TI_WITH_CUDA)
+    CUDADriver::get_instance().memset(root_buffer, 0, rounded_size);
+#else
+    TI_NOT_IMPLEMENTED
+#endif
+  } else {
+    std::memset(root_buffer, 0, rounded_size);
+  }
 
   DeviceAllocation alloc{kDeviceNullAllocation};
 
@@ -246,14 +252,14 @@ void LlvmProgramImpl::compile_snode_tree_types(
     auto host_module = clone_struct_compiler_initial_context(
         snode_trees, llvm_context_host_.get());
     struct_compiler_ = std::make_unique<StructCompilerLLVM>(
-        host_arch(), this, std::move(host_module));
+        host_arch(), this, std::move(host_module), tree->id());
 
   } else {
     TI_ASSERT(config->arch == Arch::cuda);
     auto device_module = clone_struct_compiler_initial_context(
         snode_trees, llvm_context_device_.get());
     struct_compiler_ = std::make_unique<StructCompilerLLVM>(
-        Arch::cuda, this, std::move(device_module));
+        Arch::cuda, this, std::move(device_module), tree->id());
   }
   struct_compiler_->run(*root);
 }
@@ -472,7 +478,7 @@ void LlvmProgramImpl::check_runtime_error(uint64 *result_buffer) {
             return fetch_result<uint64>(taichi_result_buffer_error_id,
                                         result_buffer);
           });
-      TI_ERROR("Assertion failure: {}", error_message_formatted);
+      throw TaichiAssertionError(error_message_formatted);
     } else {
       TI_NOT_IMPLEMENTED
     }
@@ -573,6 +579,11 @@ cpu::CpuDevice *LlvmProgramImpl::cpu_device() {
   return static_cast<cpu::CpuDevice *>(device_.get());
 }
 
+LlvmDevice *LlvmProgramImpl::llvm_device() {
+  TI_ASSERT(dynamic_cast<LlvmDevice *>(device_.get()));
+  return static_cast<LlvmDevice *>(device_.get());
+}
+
 DevicePtr LlvmProgramImpl::get_snode_tree_device_ptr(int tree_id) {
   DeviceAllocation tree_alloc = snode_tree_allocs_[tree_id];
   return tree_alloc.get_ptr();
@@ -588,7 +599,7 @@ DeviceAllocation LlvmProgramImpl::allocate_memory_ndarray(
     tlctx = llvm_context_host_.get();
   }
 
-  return get_compute_device()->allocate_memory_runtime(
+  return llvm_device()->allocate_memory_runtime(
       {{alloc_size, /*host_write=*/false, /*host_read=*/false,
         /*export_sharing=*/false, AllocUsage::Storage},
        config->ndarray_use_cached_allocator,
@@ -628,5 +639,28 @@ void LlvmProgramImpl::fill_ndarray(const DeviceAllocation &alloc,
     std::fill((uint32_t *)ptr, (uint32_t *)ptr + size, data);
   }
 }
+
+void LlvmProgramImpl::cache_kernel(
+    const std::string &kernel_key,
+    llvm::Module *module,
+    std::vector<LlvmOfflineCache::OffloadedTaskCacheData>
+        &&offloaded_task_list) {
+  if (cache_data_.kernels.find(kernel_key) != cache_data_.kernels.end()) {
+    return;
+  }
+  auto &kernel_cache = cache_data_.kernels[kernel_key];
+  kernel_cache.kernel_key = kernel_key;
+  kernel_cache.owned_module = llvm::CloneModule(*module);
+  kernel_cache.offloaded_task_list = offloaded_task_list;
+}
+
+void LlvmProgramImpl::dump_cache_data_to_disk() {
+  if (config->offline_cache && !cache_data_.kernels.empty()) {
+    LlvmOfflineCacheFileWriter writer(config->offline_cache_file_path);
+    writer.set_data(std::move(cache_data_));
+    writer.dump();
+  }
+}
+
 }  // namespace lang
 }  // namespace taichi

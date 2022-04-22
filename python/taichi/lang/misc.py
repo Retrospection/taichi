@@ -19,62 +19,154 @@ from taichi import _logging, _snode, _version_check
 
 warnings.filterwarnings("once", category=DeprecationWarning, module="taichi")
 
+# ----------------------
 i = axes(0)
+"""Axis 0. For multi-dimensional arrays it's the direction downward the rows.
+For a 1d array it's the direction along this array.
+"""
+# ----------------------
+
 j = axes(1)
+"""Axis 1. For multi-dimensional arrays it's the direction across the columns.
+"""
+# ----------------------
+
 k = axes(2)
+"""Axis 2. For arrays of dimension `d` >= 3, view each cell as an array of
+lower dimension d-2, it's the first axis of this cell.
+"""
+# ----------------------
+
 l = axes(3)
+"""Axis 3. For arrays of dimension `d` >= 4, view each cell as an array of
+lower dimension d-2, it's the second axis of this cell.
+"""
+# ----------------------
+
 ij = axes(0, 1)
+"""Axes (0, 1).
+"""
+# ----------------------
+
 ik = axes(0, 2)
+"""Axes (0, 2).
+"""
+# ----------------------
+
 il = axes(0, 3)
+"""Axes (0, 3).
+"""
+# ----------------------
+
 jk = axes(1, 2)
+"""Axes (1, 2).
+"""
+# ----------------------
+
 jl = axes(1, 3)
+"""Axes (1, 3).
+"""
+# ----------------------
+
 kl = axes(2, 3)
+"""Axes (2, 3).
+"""
+# ----------------------
+
 ijk = axes(0, 1, 2)
+"""Axes (0, 1, 2).
+"""
+# ----------------------
+
 ijl = axes(0, 1, 3)
+"""Axes (0, 1, 3).
+"""
+# ----------------------
+
 ikl = axes(0, 2, 3)
+"""Axes (0, 2, 3).
+"""
+# ----------------------
+
 jkl = axes(1, 2, 3)
+"""Axes (1, 2, 3).
+"""
+# ----------------------
+
 ijkl = axes(0, 1, 2, 3)
+"""Axes (0, 1, 2, 3).
+"""
+# ----------------------
+
+# ----------------------
 
 x86_64 = _ti_core.x64
 """The x64 CPU backend.
 """
+# ----------------------
+
 x64 = _ti_core.x64
 """The X64 CPU backend.
 """
+# ----------------------
+
 arm64 = _ti_core.arm64
 """The ARM CPU backend.
 """
+# ----------------------
+
 cuda = _ti_core.cuda
 """The CUDA backend.
 """
+# ----------------------
+
 metal = _ti_core.metal
 """The Apple Metal backend.
 """
+# ----------------------
+
 opengl = _ti_core.opengl
 """The OpenGL backend. OpenGL 4.3 required.
 """
+# ----------------------
+
 # Skip annotating this one because it is barely maintained.
 cc = _ti_core.cc
+
+# ----------------------
+
 wasm = _ti_core.wasm
 """The WebAssembly backend.
 """
+# ----------------------
+
 vulkan = _ti_core.vulkan
 """The Vulkan backend.
 """
+# ----------------------
+
 dx11 = _ti_core.dx11
 """The DX11 backend.
 """
+# ----------------------
+
 gpu = [cuda, metal, opengl, vulkan, dx11]
 """A list of GPU backends supported on the current system.
+Currently contains 'cuda', 'metal', 'opengl', 'vulkan', 'dx11'.
 
 When this is used, Taichi automatically picks the matching GPU backend. If no
 GPU is detected, Taichi falls back to the CPU backend.
 """
+# ----------------------
+
 cpu = _ti_core.host_arch()
 """A list of CPU backends supported on the current system.
+Currently contains 'x64', 'x86_64', 'arm64', 'cc', 'wasm'.
 
 When this is used, Taichi automatically picks the matching CPU backend.
 """
+# ----------------------
+
 timeline_clear = lambda: impl.get_runtime().prog.timeline_clear()  # pylint: disable=unnecessary-lambda
 timeline_save = lambda fn: impl.get_runtime().prog.timeline_save(fn)  # pylint: disable=unnecessary-lambda
 
@@ -82,6 +174,12 @@ timeline_save = lambda fn: impl.get_runtime().prog.timeline_save(fn)  # pylint: 
 type_factory_ = _ti_core.get_type_factory_instance()
 
 extension = _ti_core.Extension
+"""An instance of Taichi extension.
+
+The list of currently available extensions is ['sparse', 'async_mode', 'quant', \
+    'mesh', 'quant_basic', 'data64', 'adstack', 'bls', 'assertion', \
+        'extfunc', 'packed', 'dynamic_index'].
+"""
 
 
 def is_extension_supported(arch, ext):
@@ -99,8 +197,19 @@ def is_extension_supported(arch, ext):
 
 def reset():
     """Resets Taichi to its initial state.
+    This will destroy all the allocated fields and kernels, and restore
+    the runtime to its default configuration.
 
-    This would destroy all the fields and kernels.
+    Example::
+
+        >>> a = ti.field(ti.i32, shape=())
+        >>> a[None] = 1
+        >>> print("before reset: ", a)
+        before rest: 1
+        >>>
+        >>> ti.reset()
+        >>> print("after reset: ", a)
+        # will raise error because a is unavailable after reset.
     """
     impl.reset()
     global runtime
@@ -150,8 +259,7 @@ class _SpecialConfig:
     def __init__(self):
         self.log_level = 'info'
         self.gdb_trigger = False
-        self.experimental_real_function = False
-        self.short_circuit_operators = False
+        self.short_circuit_operators = True
 
 
 def prepare_sandbox():
@@ -233,10 +341,14 @@ def init(arch=None,
             * ``cpu_max_num_threads`` (int): Sets the number of threads used by the CPU thread pool.
             * ``debug`` (bool): Enables the debug mode, under which Taichi does a few more things like boundary checks.
             * ``print_ir`` (bool): Prints the CHI IR of the Taichi kernels.
-            * ``packed`` (bool): Enables the packed memory layout. See https://docs.taichi.graphics/lang/articles/advanced/layout.
+            * ``packed`` (bool): Enables the packed memory layout. See https://docs.taichi.graphics/lang/articles/layout.
     """
     # Check version for users every 7 days if not disabled by users.
     _version_check.start_version_check_thread()
+
+    # FIXME(https://github.com/taichi-dev/taichi/issues/4811): save the current working directory since it may be
+    # changed by the Vulkan backend initialization on OS X.
+    current_dir = os.getcwd()
 
     cfg = impl.default_cfg()
     # Check if installed version meets the requirements.
@@ -293,7 +405,6 @@ def init(arch=None,
     # submodule configurations (spec_cfg):
     env_spec.add('log_level', str)
     env_spec.add('gdb_trigger')
-    env_spec.add('experimental_real_function')
     env_spec.add('short_circuit_operators')
 
     # compiler configurations (ti.cfg):
@@ -315,8 +426,6 @@ def init(arch=None,
     # dispatch configurations that are not in ti.cfg:
     if not _test_mode:
         _ti_core.set_core_trigger_gdb_when_crash(spec_cfg.gdb_trigger)
-        impl.get_runtime().experimental_real_function = \
-            spec_cfg.experimental_real_function
         impl.get_runtime().short_circuit_operators = \
             spec_cfg.short_circuit_operators
         _logging.set_logging_level(spec_cfg.log_level.lower())
@@ -352,10 +461,14 @@ def init(arch=None,
     if not os.environ.get("TI_DISABLE_SIGNAL_HANDLERS", False):
         impl.get_runtime()._register_signal_handlers()
 
+    # Recover the current working directory (https://github.com/taichi-dev/taichi/issues/4811)
+    os.chdir(current_dir)
     return None
 
 
 def no_activate(*args):
+    """Deactivates a SNode pointer.
+    """
     for v in args:
         get_runtime().prog.no_activate(v._snode.ptr)
 
@@ -363,7 +476,7 @@ def no_activate(*args):
 def block_local(*args):
     """Hints Taichi to cache the fields and to enable the BLS optimization.
 
-    Please visit https://docs.taichi.graphics/lang/articles/advanced/performance
+    Please visit https://docs.taichi.graphics/lang/articles/performance
     for how BLS is used.
 
     Args:
@@ -379,6 +492,33 @@ def block_local(*args):
 
 
 def mesh_local(*args):
+    """Hints the compiler to cache the mesh attributes
+    and to enable the mesh BLS optimization,
+    only available for backends supporting `ti.extension.mesh` and to use with mesh-for loop.
+
+    Related to https://github.com/taichi-dev/taichi/issues/3608
+
+    Args:
+        *args (List[Attribute]): A list of mesh attributes or fields accessed as attributes.
+
+    Examples::
+
+        # instantiate model
+        mesh_builder = ti.Mesh.tri()
+        mesh_builder.verts.place({
+            'x' : ti.f32,
+            'y' : ti.f32
+        })
+        model = mesh_builder.build(meta)
+
+        @ti.kernel
+        def foo():
+            # hint the compiler to cache mesh vertex attribute `x` and `y`.
+            ti.mesh_local(model.verts.x, model.verts.y)
+            for v0 in model.verts: # mesh-for loop
+                for v1 in v0.verts:
+                    v0.x += v1.y
+    """
     for a in args:
         for v in a._get_field_members():
             get_runtime().prog.current_ast_builder().insert_snode_access_flag(
@@ -393,6 +533,29 @@ def cache_read_only(*args):
 
 
 def assume_in_range(val, base, low, high):
+    """Hints the compiler that a value is between a specified range,
+    for the compiler to perform scatchpad optimization, and return the
+    value untouched.
+
+    The assumed range is `[base + low, base + high)`.
+
+    Args:
+
+        val (Number): The input value.
+        base (Number): The base point for the range interval.
+        low (Number): The lower offset relative to `base` (included).
+        high (Number): The higher offset relative to `base` (excluded).
+
+    Returns:
+        Return the input `value` untouched.
+
+    Example::
+
+        >>> # hint the compiler that x is in range [8, 12).
+        >>> x = ti.assume_in_range(x, 10, -2, 2)
+        >>> x
+        10
+    """
     return _ti_core.expr_assume_in_range(
         Expr(val).ptr,
         Expr(base).ptr, low, high)
@@ -407,29 +570,100 @@ def loop_unique(val, covers=None):
     return _ti_core.expr_loop_unique(Expr(val).ptr, covers)
 
 
-def parallelize(v):
+def _parallelize(v):
+    """Sets the number of threads to use on CPU.
+    """
     get_runtime().prog.current_ast_builder().parallelize(v)
+    if v == 1:
+        get_runtime().prog.current_ast_builder().strictly_serialize()
 
 
-serialize = lambda: parallelize(1)
+def _serialize():
+    """Sets the number of threads to 1.
+    """
+    _parallelize(1)
 
 
-def block_dim(v):
-    get_runtime().prog.current_ast_builder().block_dim(v)
+def _block_dim(dim):
+    """Set the number of threads in a block to `dim`.
+    """
+    get_runtime().prog.current_ast_builder().block_dim(dim)
+
+
+def loop_config(*, block_dim=None, serialize=False, parallelize=None):
+    """Sets directives for the next loop
+
+    Args:
+        block_dim (int): The number of threads in a block on GPU
+        serialize (bool): Whether to let the for loop execute serially, `serialize=True` equals to `parallelize=1`
+        parallelize (int): The number of threads to use on CPU
+
+    Examples::
+
+        @ti.kernel
+        def break_in_serial_for() -> ti.i32:
+            a = 0
+            ti.loop_config(serialize=True)
+            for i in range(100):  # This loop runs serially
+                a += i
+                if i == 10:
+                    break
+            return a
+
+        break_in_serial_for()  # returns 55
+
+        n = 128
+        val = ti.field(ti.i32, shape=n)
+        @ti.kernel
+        def fill():
+            ti.loop_config(parallelize=8, block_dim=16)
+            # If the kernel is run on the CPU backend, 8 threads will be used to run it
+            # If the kernel is run on the CUDA backend, each block will have 16 threads.
+            for i in range(n):
+                val[i] = i
+    """
+    if block_dim is not None:
+        _block_dim(block_dim)
+
+    if serialize:
+        _parallelize(1)
+    elif parallelize is not None:
+        _parallelize(parallelize)
 
 
 def global_thread_idx():
+    """Returns the global thread id of this running thread,
+    only available for cpu and cuda backends.
+
+    For cpu backends this is equal to the cpu thread id,
+    For cuda backends this is equal to `block_id * block_dim + thread_id`.
+
+    Example::
+
+        >>> f = ti.field(ti.f32, shape=(16, 16))
+        >>> @ti.kernel
+        >>> def test():
+        >>>     for i in ti.grouped(f):
+        >>>         print(ti.global_thread_idx())
+        >>>
+        test()
+    """
     return impl.get_runtime().prog.current_ast_builder(
     ).insert_thread_idx_expr()
 
 
 def mesh_patch_idx():
+    """Returns the internal mesh patch id of this running thread,
+    only available for backends supporting `ti.extension.mesh` and to use within mesh-for loop.
+
+    Related to https://github.com/taichi-dev/taichi/issues/3608
+    """
     return impl.get_runtime().prog.current_ast_builder().insert_patch_idx_expr(
     )
 
 
 def Tape(loss, clear_gradients=True):
-    """Return a context manager of :class:`~taichi.lang.tape.TapeImpl`. The
+    """Returns a context manager of :class:`~taichi.lang.tape.TapeImpl`. The
     context manager would catching all of the callings of functions that
     decorated by :func:`~taichi.lang.kernel_impl.kernel` or
     :func:`~taichi.ad.grad_replaced` under `with` statement, and calculate
@@ -455,7 +689,8 @@ def Tape(loss, clear_gradients=True):
         >>>         y[None] += x[I] ** a
         >>>
         >>> with ti.Tape(loss = y):
-        >>>     sum(2)"""
+        >>>     sum(2)
+    """
     impl.get_runtime().materialize()
     if len(loss.shape) != 0:
         raise RuntimeError(
@@ -474,7 +709,8 @@ def Tape(loss, clear_gradients=True):
 
 
 def clear_all_gradients():
-    """Set all fields' gradients to 0."""
+    """Sets the gradients of all fields to zero.
+    """
     impl.get_runtime().materialize()
 
     def visit(node):
@@ -553,8 +789,8 @@ def get_host_arch_list():
 __all__ = [
     'i', 'ij', 'ijk', 'ijkl', 'ijl', 'ik', 'ikl', 'il', 'j', 'jk', 'jkl', 'jl',
     'k', 'kl', 'l', 'x86_64', 'x64', 'dx11', 'wasm', 'arm64', 'cc', 'cpu',
-    'cuda', 'gpu', 'metal', 'opengl', 'vulkan', 'extension', 'parallelize',
-    'block_dim', 'global_thread_idx', 'Tape', 'assume_in_range', 'block_local',
+    'cuda', 'gpu', 'metal', 'opengl', 'vulkan', 'extension', 'loop_config',
+    'global_thread_idx', 'Tape', 'assume_in_range', 'block_local',
     'cache_read_only', 'clear_all_gradients', 'init', 'mesh_local',
     'no_activate', 'reset', 'mesh_patch_idx'
 ]

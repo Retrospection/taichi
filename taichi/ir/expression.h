@@ -7,7 +7,7 @@
 
 TLANG_NAMESPACE_BEGIN
 
-#include "taichi/ir/expression_ops.h"
+class ExpressionVisitor;
 
 // always a tree - used as rvalues
 class Expression {
@@ -44,7 +44,7 @@ class Expression {
     // implemented
   }
 
-  virtual void serialize(std::ostream &ss) = 0;
+  virtual void accept(ExpressionVisitor *visitor) = 0;
 
   virtual void flatten(FlattenContext *ctx) {
     TI_NOT_IMPLEMENTED;
@@ -112,10 +112,6 @@ class ExprGroup {
   Expr &operator[](int i) {
     return exprs[i];
   }
-
-  void serialize(std::ostream &ss) const;
-
-  std::string serialize() const;
 };
 
 inline ExprGroup operator,(const Expr &a, const Expr &b) {
@@ -125,5 +121,54 @@ inline ExprGroup operator,(const Expr &a, const Expr &b) {
 inline ExprGroup operator,(const ExprGroup &a, const Expr &b) {
   return ExprGroup(a, b);
 }
+
+#define PER_EXPRESSION(x) class x;
+#include "taichi/inc/expressions.inc.h"
+#undef PER_EXPRESSION
+
+class ExpressionVisitor {
+ public:
+  ExpressionVisitor(bool allow_undefined_visitor = false,
+                    bool invoke_default_visitor = false)
+      : allow_undefined_visitor_(allow_undefined_visitor),
+        invoke_default_visitor_(invoke_default_visitor) {
+  }
+
+  virtual ~ExpressionVisitor() = default;
+
+  virtual void visit(ExprGroup &expr_group) = 0;
+
+  void visit(Expr &expr) {
+    expr.expr->accept(this);
+  }
+
+  virtual void visit(Expression *expr) {
+    if (!allow_undefined_visitor_) {
+      TI_ERROR("missing visitor function");
+    }
+  }
+
+#define DEFINE_VISIT(T)             \
+  virtual void visit(T *expr) {     \
+    if (allow_undefined_visitor_) { \
+      if (invoke_default_visitor_)  \
+        visit((Expression *)expr);  \
+    } else                          \
+      TI_NOT_IMPLEMENTED;           \
+  }
+
+#define PER_EXPRESSION(x) DEFINE_VISIT(x)
+#include "taichi/inc/expressions.inc.h"
+#undef PER_EXPRESSION
+#undef DEFINE_VISIT
+ private:
+  bool allow_undefined_visitor_{false};
+  bool invoke_default_visitor_{false};
+};
+
+#define TI_DEFINE_ACCEPT_FOR_EXPRESSION              \
+  void accept(ExpressionVisitor *visitor) override { \
+    visitor->visit(this);                            \
+  }
 
 TLANG_NAMESPACE_END

@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.12)
 project(taichi)
 
 if (NOT DEFINED TI_VERSION_MAJOR)
-    message(WARNING "It seems that you are running cmake manually, which may cause issues. Please use setup.py to build taichi from source, see https://docs.taichi.graphics/lang/articles/contribution/dev_install for more details.")
+    message(WARNING "It seems that you are running cmake manually, which may cause issues. Please use setup.py to build taichi from source, see https://docs.taichi.graphics/lang/articles/dev_install for more details.")
     set(TI_VERSION_MAJOR 0)
     set(TI_VERSION_MINOR 0)
     set(TI_VERSION_PATCH 0)
@@ -54,6 +54,21 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/build")
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
+option(USE_LLD "Use lld (from llvm) linker" OFF)
+option(USE_MOLD "Use mold (A Modern Linker)" OFF)
+
+if (USE_LLD)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fuse-ld=lld")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fuse-ld=lld")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+endif()
+
+if (USE_MOLD)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fuse-ld=mold")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fuse-ld=mold")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=mold")
 endif()
 
 # No support of Python for Android build
@@ -114,7 +129,7 @@ endmacro()
 
 if (APPLE)
   set(CLANG_OSX_FLAGS "-isysroot${CMAKE_OSX_SYSROOT}")
-  set(CLANG_HIGHEST_VERSION "13")
+  set(CLANG_HIGHEST_VERSION "12")
 else()
   set(CLANG_HIGHEST_VERSION "11")
 endif()
@@ -148,6 +163,10 @@ configure_file(taichi/common/version.h.in ${CMAKE_SOURCE_DIR}/taichi/common/vers
 configure_file(taichi/common/commit_hash.h.in ${CMAKE_SOURCE_DIR}/taichi/common/commit_hash.h)
 
 option(TI_EXPORT_CORE "export taichi core" OFF)
+
+if(ANDROID)
+    set(TI_EXPORT_CORE ON)
+endif()
 
 if (TI_EXPORT_CORE)
   include(cmake/TaichiExportCore.cmake)

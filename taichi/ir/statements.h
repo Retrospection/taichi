@@ -657,7 +657,6 @@ class LocalStoreStmt : public Stmt {
 class IfStmt : public Stmt {
  public:
   Stmt *cond;
-  Stmt *true_mask, *false_mask;
   std::unique_ptr<Block> true_statements, false_statements;
 
   explicit IfStmt(Stmt *cond);
@@ -672,7 +671,7 @@ class IfStmt : public Stmt {
 
   std::unique_ptr<Stmt> clone() const override;
 
-  TI_STMT_DEF_FIELDS(cond, true_mask, false_mask);
+  TI_STMT_DEF_FIELDS(cond);
   TI_DEFINE_ACCEPT
 };
 
@@ -887,8 +886,13 @@ class FuncCallStmt : public Stmt {
  public:
   Function *func;
   std::vector<Stmt *> args;
+  bool global_side_effect{true};
 
   FuncCallStmt(Function *func, const std::vector<Stmt *> &args);
+
+  bool has_global_side_effect() const override {
+    return global_side_effect;
+  }
 
   TI_STMT_DEF_FIELDS(ret_type, func, args);
   TI_DEFINE_ACCEPT_AND_CLONE
@@ -1400,11 +1404,15 @@ class InternalFuncStmt : public Stmt {
  public:
   std::string func_name;
   std::vector<Stmt *> args;
+  bool with_runtime_context;
 
   explicit InternalFuncStmt(const std::string &func_name,
                             const std::vector<Stmt *> &args,
-                            Type *ret_type = nullptr)
-      : func_name(func_name), args(args) {
+                            Type *ret_type = nullptr,
+                            bool with_runtime_context = true)
+      : func_name(func_name),
+        args(args),
+        with_runtime_context(with_runtime_context) {
     if (ret_type == nullptr) {
       this->ret_type =
           TypeFactory::create_vector_or_scalar_type(1, PrimitiveType::i32);
@@ -1414,7 +1422,7 @@ class InternalFuncStmt : public Stmt {
     TI_STMT_REG_FIELDS;
   }
 
-  TI_STMT_DEF_FIELDS(ret_type, func_name, args);
+  TI_STMT_DEF_FIELDS(ret_type, func_name, args, with_runtime_context);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 
@@ -1620,7 +1628,7 @@ class MeshRelationAccessStmt : public Stmt {
         mesh_idx(mesh_idx),
         to_type(to_type),
         neighbor_idx(neighbor_idx) {
-    this->ret_type = PrimitiveType::i32;
+    this->ret_type = PrimitiveType::u16;
     TI_STMT_REG_FIELDS;
   }
 
@@ -1631,7 +1639,7 @@ class MeshRelationAccessStmt : public Stmt {
         mesh_idx(mesh_idx),
         to_type(to_type),
         neighbor_idx(nullptr) {
-    this->ret_type = PrimitiveType::i32;
+    this->ret_type = PrimitiveType::u16;
     TI_STMT_REG_FIELDS;
   }
 

@@ -5,7 +5,7 @@
 constexpr int taichi_max_num_indices = 8;
 // legacy: only used in cc and opengl backends
 constexpr int taichi_max_num_args = 8;
-// used in llvm backend: only the first 16 arguments can be ext_arr/any_arr
+// used in llvm backend: only the first 16 arguments can be types.ndarray
 // TODO: refine argument passing
 constexpr int taichi_max_num_args_total = 64;
 constexpr int taichi_max_num_args_extra = 16;
@@ -22,8 +22,8 @@ constexpr std::size_t taichi_max_num_ret_value = 30;
 // slot for kernel return value
 constexpr std::size_t taichi_result_buffer_ret_value_id = 0;
 // slot for error code and error message char *
-constexpr std::size_t taichi_result_buffer_error_id = 1;
-constexpr std::size_t taichi_result_buffer_runtime_query_id = 2;
+constexpr std::size_t taichi_result_buffer_error_id = 30;
+constexpr std::size_t taichi_result_buffer_runtime_query_id = 31;
 
 constexpr int taichi_listgen_max_element_size = 1024;
 

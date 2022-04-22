@@ -357,6 +357,12 @@ std::unique_ptr<llvm::Module> TaichiLLVMContext::clone_module(
     patch_intrinsic("grid_memfence", Intrinsic::nvvm_membar_gl, false);
     patch_intrinsic("system_memfence", Intrinsic::nvvm_membar_sys, false);
 
+    patch_intrinsic("cuda_all", Intrinsic::nvvm_vote_all);
+    patch_intrinsic("cuda_all_sync", Intrinsic::nvvm_vote_all_sync);
+
+    patch_intrinsic("cuda_any", Intrinsic::nvvm_vote_any);
+    patch_intrinsic("cuda_any_sync", Intrinsic::nvvm_vote_any_sync);
+
     patch_intrinsic("cuda_ballot", Intrinsic::nvvm_vote_ballot);
     patch_intrinsic("cuda_ballot_sync", Intrinsic::nvvm_vote_ballot_sync);
 
@@ -364,6 +370,16 @@ std::unique_ptr<llvm::Module> TaichiLLVMContext::clone_module(
                     Intrinsic::nvvm_shfl_sync_down_i32);
     patch_intrinsic("cuda_shfl_down_sync_f32",
                     Intrinsic::nvvm_shfl_sync_down_f32);
+
+    patch_intrinsic("cuda_shfl_up_sync_i32", Intrinsic::nvvm_shfl_sync_up_i32);
+    patch_intrinsic("cuda_shfl_up_sync_f32", Intrinsic::nvvm_shfl_sync_up_f32);
+
+    patch_intrinsic("cuda_shfl_sync_i32", Intrinsic::nvvm_shfl_sync_idx_i32);
+
+    patch_intrinsic("cuda_shfl_sync_f32", Intrinsic::nvvm_shfl_sync_idx_f32);
+
+    patch_intrinsic("cuda_shfl_xor_sync_i32",
+                    Intrinsic::nvvm_shfl_sync_bfly_i32);
 
     patch_intrinsic("cuda_match_any_sync_i32",
                     Intrinsic::nvvm_match_any_sync_i32);
@@ -735,6 +751,22 @@ void TaichiLLVMContext::update_runtime_jit_module(
            starts_with(func_name, "LLVMRuntime_");
   });
   runtime_jit_module = add_module(std::move(module));
+}
+
+void TaichiLLVMContext::delete_functions_of_snode_tree(int id) {
+  if (!snode_tree_funcs_.count(id)) {
+    return;
+  }
+  llvm::Module *module = get_this_thread_struct_module();
+  for (auto str : snode_tree_funcs_[id]) {
+    auto *func = module->getFunction(str);
+    func->eraseFromParent();
+  }
+  snode_tree_funcs_.erase(id);
+}
+
+void TaichiLLVMContext::add_function_to_snode_tree(int id, std::string func) {
+  snode_tree_funcs_[id].push_back(func);
 }
 
 TI_REGISTER_TASK(make_slim_libdevice);

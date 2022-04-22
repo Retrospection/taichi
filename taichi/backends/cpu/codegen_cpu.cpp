@@ -16,8 +16,13 @@ class CodeGenLLVMCPU : public CodeGenLLVM {
  public:
   using IRVisitor::visit;
 
-  CodeGenLLVMCPU(Kernel *kernel, IRNode *ir) : CodeGenLLVM(kernel, ir) {
+  CodeGenLLVMCPU(Kernel *kernel, IRNode *ir)
+      : CodeGenLLVM(kernel, ir, nullptr) {
     TI_AUTO_PROF
+  }
+
+  bool supports_offline_cache() const override {
+    return true;
   }
 
   void create_offload_range_for(OffloadedStmt *stmt) override {
@@ -173,6 +178,8 @@ class CodeGenLLVMCPU : public CodeGenLLVM {
       TI_NOT_IMPLEMENTED
     }
     if (prog->config.kernel_profiler && arch_is_cpu(prog->config.arch)) {
+      llvm::IRBuilderBase::InsertPointGuard guard(*builder);
+      builder->SetInsertPoint(final_block);
       call(builder.get(), "LLVMRuntime_profiler_stop", {get_runtime()});
     }
     finalize_offloaded_task_function();

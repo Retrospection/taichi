@@ -171,7 +171,7 @@ def test_compare_fail():
 
         @ti.kernel
         def foo():
-            1 is [1]
+            None is None
 
         foo()
 
@@ -906,8 +906,8 @@ def test_ndarray():
     m = 7
 
     @ti.kernel
-    def run(x: ti.any_arr(element_dim=2, layout=ti.Layout.AOS),
-            y: ti.any_arr()):
+    def run(x: ti.types.ndarray(element_dim=2, layout=ti.Layout.AOS),
+            y: ti.types.ndarray()):
         for i in ti.static(range(n)):
             for j in ti.static(range(m)):
                 x[i, j][0, 0] += i + j + y[i, j]

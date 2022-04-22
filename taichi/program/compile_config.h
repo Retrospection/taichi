@@ -43,6 +43,7 @@ struct CompileConfig {
   bool make_block_local;
   bool detect_read_only;
   bool ndarray_use_cached_allocator;
+  bool use_mesh;
   DataType default_fp;
   DataType default_ip;
   std::string extra_flags;
@@ -104,6 +105,10 @@ struct CompileConfig {
   bool demote_no_access_mesh_fors{true};
   bool experimental_auto_mesh_local{false};
   int auto_mesh_local_default_occupacy{4};
+
+  // Offline cache options
+  bool offline_cache{false};
+  std::string offline_cache_file_path{get_repo_dir() + "ticache"};
 
   CompileConfig();
 };

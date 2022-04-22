@@ -103,6 +103,12 @@ class LoopScopeGuard:
             self.non_static_guard.__exit__(exc_type, exc_val, exc_tb)
 
 
+class ReturnStatus(Enum):
+    NoReturn = 0
+    ReturnedVoid = 1
+    ReturnedValue = 2
+
+
 class ASTTransformerContext:
     def __init__(self,
                  excluded_parameters=(),
@@ -114,7 +120,8 @@ class ASTTransformerContext:
                  file=None,
                  src=None,
                  start_lineno=None,
-                 ast_builder=None):
+                 ast_builder=None,
+                 is_real_function=False):
         self.func = func
         self.local_scopes = []
         self.loop_scopes = []
@@ -137,9 +144,10 @@ class ASTTransformerContext:
         self.raised = False
         self.non_static_control_flow_status = NonStaticControlFlowStatus()
         self.static_scope_status = StaticScopeStatus()
-        self.returned = False
+        self.returned = ReturnStatus.NoReturn
         self.ast_builder = ast_builder
         self.visited_funcdef = False
+        self.is_real_function = is_real_function
 
     # e.g.: FunctionDef, Module, Global
     def variable_scope_guard(self):

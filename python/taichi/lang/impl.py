@@ -4,7 +4,6 @@ from typing import Iterable
 
 import numpy as np
 from taichi._lib import core as _ti_core
-from taichi._logging import error
 from taichi._snode.fields_builder import FieldsBuilder
 from taichi.lang._ndarray import ScalarNdarray
 from taichi.lang._ndrange import GroupedNDRange, _Ndrange
@@ -23,8 +22,7 @@ from taichi.lang.snode import SNode
 from taichi.lang.struct import Struct, StructField, _IntermediateStruct
 from taichi.lang.tape import TapeImpl
 from taichi.lang.util import (cook_dtype, get_traceback, is_taichi_class,
-                              python_scope, taichi_scope, to_numpy_type,
-                              to_taichi_type, warning)
+                              python_scope, taichi_scope, warning)
 from taichi.types.primitive_types import f16, f32, f64, i32, i64
 
 
@@ -38,6 +36,8 @@ def expr_init_local_tensor(shape, element_type, elements):
 def expr_init(rhs):
     if rhs is None:
         return Expr(get_runtime().prog.current_ast_builder().expr_alloca())
+    if isinstance(rhs, Matrix) and (hasattr(rhs, "_DIM")):
+        return type(rhs)(*rhs.to_list())
     if isinstance(rhs, Matrix):
         return Matrix(rhs.to_list())
     if isinstance(rhs, Struct):
@@ -65,25 +65,6 @@ def expr_init(rhs):
 
 
 @taichi_scope
-def expr_init_list(xs, expected):
-    if not isinstance(xs, (list, tuple, Matrix)):
-        raise TypeError(f'Cannot unpack type: {type(xs)}')
-    if isinstance(xs, Matrix):
-        if not xs.m == 1:
-            raise ValueError(
-                'Matrices with more than one columns cannot be unpacked')
-        xs = xs.entries
-    if expected != len(xs):
-        raise ValueError(
-            f'Tuple assignment size mismatch: {expected} != {len(xs)}')
-    if isinstance(xs, list):
-        return [expr_init(e) for e in xs]
-    if isinstance(xs, tuple):
-        return tuple(expr_init(e) for e in xs)
-    raise ValueError(f'Cannot unpack from {type(xs)}')
-
-
-@taichi_scope
 def expr_init_func(
         rhs):  # temporary solution to allow passing in fields as arguments
     if isinstance(rhs, Field):
@@ -94,7 +75,7 @@ def expr_init_func(
 def begin_frontend_struct_for(ast_builder, group, loop_range):
     if not isinstance(loop_range, (AnyArray, Field, SNode, _Root)):
         raise TypeError(
-            'Can only iterate through Taichi fields/snodes (via template) or dense arrays (via any_arr)'
+            'Can only iterate through Taichi fields/snodes (via template) or dense arrays (via types.ndarray)'
         )
     if group.size() != len(loop_range.shape):
         raise IndexError(
@@ -117,25 +98,23 @@ def begin_frontend_if(ast_builder, cond):
     ast_builder.begin_frontend_if(Expr(cond).ptr)
 
 
-def wrap_scalar(x):
-    if type(x) in [int, float]:
-        return Expr(x)
-    return x
-
-
 @taichi_scope
 def subscript(value, *_indices, skip_reordered=False):
     if isinstance(value, np.ndarray):
-        return value.__getitem__(*_indices)
+        return value.__getitem__(_indices)
 
     if isinstance(value, (tuple, list, dict)):
         assert len(_indices) == 1
         return value[_indices[0]]
 
+    has_slice = False
     flattened_indices = []
     for _index in _indices:
         if is_taichi_class(_index):
             ind = _index.entries
+        elif isinstance(_index, slice):
+            ind = [_index]
+            has_slice = True
         else:
             ind = [_index]
         flattened_indices += ind
@@ -143,8 +122,14 @@ def subscript(value, *_indices, skip_reordered=False):
     if isinstance(_indices,
                   tuple) and len(_indices) == 1 and _indices[0] is None:
         _indices = ()
-    indices_expr_group = make_expr_group(*_indices)
-    index_dim = indices_expr_group.size()
+
+    if has_slice:
+        if not isinstance(value, Matrix):
+            raise SyntaxError(
+                f"The type {type(value)} do not support index of slice type")
+    else:
+        indices_expr_group = make_expr_group(*_indices)
+        index_dim = indices_expr_group.size()
 
     if is_taichi_class(value):
         return value._subscript(*_indices)
@@ -226,34 +211,6 @@ def make_tensor_element_expr(_var, _indices, shape, stride):
                                           shape, stride))
 
 
-@taichi_scope
-def insert_expr_stmt_if_ti_func(ast_builder, func, *args, **kwargs):
-    """This method is used only for real functions. It inserts a
-    FrontendExprStmt to the C++ AST to hold the function call if `func` is a
-    Taichi function.
-
-    Args:
-        func: The function to be called.
-        args: The arguments of the function call.
-        kwargs: The keyword arguments of the function call.
-
-    Returns:
-        The return value of the function call if it's a non-Taichi function.
-        Returns None if it's a Taichi function."""
-    is_taichi_function = getattr(func, '_is_taichi_function', False)
-    # If is_taichi_function is true: call a decorated Taichi function
-    # in a Taichi kernel/function.
-
-    if is_taichi_function:
-        # Compiles the function here.
-        # Invokes Func.__call__.
-        func_call_result = func(*args, **kwargs)
-        # Insert FrontendExprStmt here.
-        return ast_builder.insert_expr_stmt(func_call_result.ptr)
-    # Call the non-Taichi function directly.
-    return func(*args, **kwargs)
-
-
 class PyTaichi:
     def __init__(self, kernels=None):
         self.materialized = False
@@ -265,7 +222,6 @@ class PyTaichi:
         self.current_kernel = None
         self.global_vars = []
         self.matrix_fields = []
-        self.experimental_real_function = False
         self.default_fp = f32
         self.default_ip = i32
         self.target_tape = None
@@ -382,47 +338,6 @@ def get_runtime():
     return pytaichi
 
 
-def _check_in_range(npty, val):
-    iif = np.iinfo(npty)
-    if not iif.min <= val <= iif.max:
-        # This isn't the case we want to deal with: |val| does't fall into the valid range of either
-        # the signed or the unsigned type.
-        error(
-            f'Constant {val} has exceeded the range of {to_taichi_type(npty)}: [{iif.min}, {iif.max}]'
-        )
-
-
-def _clamp_unsigned_to_range(npty, val):
-    # npty: np.int32 or np.int64
-    iif = np.iinfo(npty)
-    if iif.min <= val <= iif.max:
-        return val
-    cap = (1 << iif.bits)
-    assert 0 <= val < cap
-    new_val = val - cap
-    return new_val
-
-
-@taichi_scope
-def make_constant_expr_i32(val):
-    assert isinstance(val, (int, np.integer))
-    return Expr(_ti_core.make_const_expr_int(i32, val))
-
-
-@taichi_scope
-def make_constant_expr(val, dtype):
-    if isinstance(val, (int, np.integer)):
-        constant_dtype = pytaichi.default_ip if dtype is None else dtype
-        _check_in_range(to_numpy_type(constant_dtype), val)
-        return Expr(
-            _ti_core.make_const_expr_int(
-                constant_dtype, _clamp_unsigned_to_range(np.int64, val)))
-    if isinstance(val, (float, np.floating)):
-        constant_dtype = pytaichi.default_fp if dtype is None else dtype
-        return Expr(_ti_core.make_const_expr_fp(constant_dtype, val))
-    raise TaichiTypeError(f'Invalid constant scalar data type: {type(val)}')
-
-
 def reset():
     global pytaichi
     old_kernels = pytaichi.kernels
@@ -435,11 +350,34 @@ def reset():
 
 @taichi_scope
 def static_print(*args, __p=print, **kwargs):
+    """The print function in Taichi scope.
+
+    This function is called at compile time and has no runtime overhead.
+    """
     __p(*args, **kwargs)
 
 
 # we don't add @taichi_scope decorator for @ti.pyfunc to work
 def static_assert(cond, msg=None):
+    """Throw AssertionError when `cond` is False.
+
+    This function is called at compile time and has no runtime overhead.
+    The bool value in `cond` must can be determined at compile time.
+
+    Args:
+        cond (bool): an expression with a bool value.
+        msg (str): assertion message.
+
+    Example::
+
+        >>> year = 2001
+        >>> @ti.kernel
+        >>> def test():
+        >>>     ti.static_assert(year % 4 == 0, "the year must be a lunar year")
+        AssertionError: the year must be a lunar year
+    """
+    if isinstance(cond, Expr):
+        raise TaichiTypeError("Static assert with non-static condition")
     if msg is not None:
         assert cond, msg
     else:
@@ -527,7 +465,7 @@ class _Root:
 root = _Root()
 """Root of the declared Taichi :func:`~taichi.lang.impl.field`s.
 
-See also https://docs.taichi.graphics/lang/articles/advanced/layout
+See also https://docs.taichi.graphics/lang/articles/layout
 
 Example::
 
@@ -541,7 +479,7 @@ def create_field_member(dtype, name):
     dtype = cook_dtype(dtype)
 
     # primal
-    x = Expr(_ti_core.make_id_expr(""))
+    x = Expr(get_runtime().prog.make_id_expr(""))
     x.declaration_tb = get_traceback(stacklevel=4)
     x.ptr = _ti_core.global_new(x.ptr, dtype)
     x.ptr.set_name(name)
@@ -551,7 +489,7 @@ def create_field_member(dtype, name):
     x_grad = None
     if _ti_core.needs_grad(dtype):
         # adjoint
-        x_grad = Expr(_ti_core.make_id_expr(""))
+        x_grad = Expr(get_runtime().prog.make_id_expr(""))
         x_grad.ptr = _ti_core.global_new(x_grad.ptr, dtype)
         x_grad.ptr.set_name(name + ".grad")
         x_grad.ptr.set_is_primal(False)
@@ -562,24 +500,25 @@ def create_field_member(dtype, name):
 
 @python_scope
 def field(dtype, shape=None, name="", offset=None, needs_grad=False):
-    """Defines a Taichi field
+    """Defines a Taichi field.
 
     A Taichi field can be viewed as an abstract N-dimensional array, hiding away
     the complexity of how its underlying :class:`~taichi.lang.snode.SNode` are
     actually defined. The data in a Taichi field can be directly accessed by
     a Taichi :func:`~taichi.lang.kernel_impl.kernel`.
 
-    See also https://docs.taichi.graphics/lang/articles/basic/field
+    See also https://docs.taichi.graphics/lang/articles/field
 
     Args:
         dtype (DataType): data type of the field.
-        shape (Union[int, tuple[int]], optional): shape of the field
-        name (str, optional): name of the field
-        offset (Union[int, tuple[int]], optional): offset of the field domain
+        shape (Union[int, tuple[int]], optional): shape of the field.
+        name (str, optional): name of the field.
+        offset (Union[int, tuple[int]], optional): offset of the field domain.
         needs_grad (bool, optional): whether this field participates in autodiff
             and thus needs an adjoint field to store the gradients.
 
-    Example:
+    Example::
+
         The code below shows how a Taichi field can be declared and defined::
 
             >>> x1 = ti.field(ti.f32, shape=(16, 8))
@@ -634,7 +573,7 @@ def ndarray(dtype, shape):
 
 
 @taichi_scope
-def ti_print(*_vars, sep=' ', end='\n'):
+def ti_format_list_to_content_entries(raw):
     def entry2content(_var):
         if isinstance(_var, str):
             return _var
@@ -666,13 +605,6 @@ def ti_print(*_vars, sep=' ', end='\n'):
             for v in vars2entries(res):
                 yield v
 
-    def add_separators(_vars):
-        for i, _var in enumerate(_vars):
-            if i:
-                yield sep
-            yield _var
-        yield end
-
     def fused_string(entries):
         accumated = ''
         for entry in entries:
@@ -686,11 +618,23 @@ def ti_print(*_vars, sep=' ', end='\n'):
         if accumated:
             yield accumated
 
-    _vars = add_separators(_vars)
-    entries = vars2entries(_vars)
+    entries = vars2entries(raw)
     entries = fused_string(entries)
-    contentries = [entry2content(entry) for entry in entries]
-    get_runtime().prog.current_ast_builder().create_print(contentries)
+    return [entry2content(entry) for entry in entries]
+
+
+@taichi_scope
+def ti_print(*_vars, sep=' ', end='\n'):
+    def add_separators(_vars):
+        for i, _var in enumerate(_vars):
+            if i:
+                yield sep
+            yield _var
+        yield end
+
+    _vars = add_separators(_vars)
+    entries = ti_format_list_to_content_entries(_vars)
+    get_runtime().prog.current_ast_builder().create_print(entries)
 
 
 @taichi_scope
@@ -733,7 +677,7 @@ def ti_assert(cond, msg, extra_args):
     # Mostly a wrapper to help us convert from Expr (defined in Python) to
     # _ti_core.Expr (defined in C++)
     get_runtime().prog.current_ast_builder().create_assert_stmt(
-        Expr(cond).ptr, msg, [Expr(x).ptr for x in extra_args])
+        Expr(cond).ptr, msg, extra_args)
 
 
 @taichi_scope
@@ -753,28 +697,46 @@ def ti_float(_var):
 @taichi_scope
 def zero(x):
     # TODO: get dtype from Expr and Matrix:
-    """Fill the input field with zero.
+    """Returns an array of zeros with the same shape and type as the input. It's also a scalar
+    if the input is a scalar.
 
     Args:
-        x (DataType): The input field to fill.
+        x (Union[:mod:`~taichi.types.primitive_types`, :class:`~taichi.Matrix`]): The input.
 
     Returns:
-        DataType: The output field, which keeps the shape but filled with zero.
+        A new copy of the input but filled with zeros.
 
+    Example::
+
+        >>> x = ti.Vector([1, 1])
+        >>> @ti.kernel
+        >>> def test():
+        >>>     y = ti.zero(x)
+        >>>     print(y)
+        [0, 0]
     """
     return x * 0
 
 
 @taichi_scope
 def one(x):
-    """Fill the input field with one.
+    """Returns an array of ones with the same shape and type as the input. It's also a scalar
+    if the input is a scalar.
 
     Args:
-        x (DataType): The input field to fill.
+        x (Union[:mod:`~taichi.types.primitive_types`, :class:`~taichi.Matrix`]): The input.
 
     Returns:
-        DataType: The output field, which keeps the shape but filled with one.
+        A new copy of the input but filled with ones.
 
+    Example::
+
+        >>> x = ti.Vector([0, 0])
+        >>> @ti.kernel
+        >>> def test():
+        >>>     y = ti.one(x)
+        >>>     print(y)
+        [1, 1]
     """
     return zero(x) + 1
 
@@ -798,9 +760,9 @@ def static(x, *xs):
     """Evaluates a Taichi-scope expression at compile time.
 
     `static()` is what enables the so-called metaprogramming in Taichi. It is
-    in many ways similar to ``constexpr`` in C++11.
+    in many ways similar to ``constexpr`` in C++.
 
-    See also https://docs.taichi.graphics/lang/articles/advanced/meta.
+    See also https://docs.taichi.graphics/lang/articles/meta.
 
     Args:
         x (Any): an expression to be evaluated
@@ -809,14 +771,16 @@ def static(x, *xs):
     Example:
         The most common usage of `static()` is for compile-time evaluation::
 
+            >>> cond = False
+            >>>
             >>> @ti.kernel
             >>> def run():
-            >>>     if ti.static(FOO):
+            >>>     if ti.static(cond):
             >>>         do_a()
             >>>     else:
             >>>         do_b()
 
-        Depending on the value of ``FOO``, ``run()`` will be directly compiled
+        Depending on the value of ``cond``, ``run()`` will be directly compiled
         into either ``do_a()`` or ``do_b()``. Thus there won't be a runtime
         condition check.
 
@@ -827,7 +791,7 @@ def static(x, *xs):
             >>>     for i in ti.static(range(3)):
             >>>         print(i)
             >>>
-            >>> # The above is equivalent to:
+            >>> # The above will be unrolled to:
             >>> @ti.kernel
             >>> def run():
             >>>     print(0)
@@ -854,15 +818,24 @@ def static(x, *xs):
 
 @taichi_scope
 def grouped(x):
-    """Groups a list of independent loop indices into a :func:`~taichi.lang.matrix.Vector`.
+    """Groups the indices in the iterator returned by `ndrange()` into a 1-D vector.
+
+    This is often used when you want to iterate over all indices returned by `ndrange()`
+    in one `for` loop and a single index.
 
     Args:
-        x (Any): does the grouping only if `x` is a :class:`~taichi.lang.ndrange`.
+        x (:func:`~taichi.ndrange`): an iterator object returned by `ti.ndrange`.
 
     Example::
+        >>> # without ti.grouped
+        >>> for I in ti.ndrange(2, 3):
+        >>>     print(I)
+        prints 0, 1, 2, 3, 4, 5
 
-        >>> for I in ti.grouped(ndrange(8, 16)):
-        >>>     print(I[0] + I[1])
+        >>> # with ti.grouped
+        >>> for I in ti.grouped(ndrange(2, 3)):
+        >>>     print(I)
+        prints [0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]
     """
     if isinstance(x, _Ndrange):
         return x.grouped()
@@ -870,6 +843,11 @@ def grouped(x):
 
 
 def stop_grad(x):
+    """Stops computing gradients during back propagation.
+
+    Args:
+        x (:class:`~taichi.Field`): A field.
+    """
     get_runtime().prog.current_ast_builder().stop_grad(x.snode.ptr)
 
 
@@ -881,9 +859,10 @@ def default_cfg():
     return _ti_core.default_compile_config()
 
 
-def call_internal(name, *args):
+def call_internal(name, *args, with_runtime_context=True):
     return expr_init(
-        _ti_core.insert_internal_func_call(name, make_expr_group(args)))
+        _ti_core.insert_internal_func_call(name, make_expr_group(args),
+                                           with_runtime_context))
 
 
 @taichi_scope

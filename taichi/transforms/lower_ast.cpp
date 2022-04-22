@@ -14,10 +14,10 @@ namespace {
 
 using FlattenContext = Expression::FlattenContext;
 
-template <typename T>
-std::vector<T *> make_raw_pointer_list(
-    const std::vector<std::unique_ptr<T>> &unique_pointers) {
-  std::vector<T *> raw_pointers;
+template <typename Vec>
+std::vector<typename Vec::value_type::pointer> make_raw_pointer_list(
+    const Vec &unique_pointers) {
+  std::vector<typename Vec::value_type::pointer> raw_pointers;
   for (auto &ptr : unique_pointers)
     raw_pointers.push_back(ptr.get());
   return raw_pointers;
@@ -33,6 +33,7 @@ class LowerAST : public IRVisitor {
   Stmt *capturing_loop_;
   std::unordered_set<Stmt *> detected_fors_with_break_;
   Block *current_block_;
+  int current_block_depth_;
 
   FlattenContext make_flatten_ctx() {
     FlattenContext fctx;
@@ -43,7 +44,8 @@ class LowerAST : public IRVisitor {
  public:
   explicit LowerAST(const std::unordered_set<Stmt *> &_detected_fors_with_break)
       : detected_fors_with_break_(_detected_fors_with_break),
-        current_block_(nullptr) {
+        current_block_(nullptr),
+        current_block_depth_(0) {
     // TODO: change this to false
     allow_undefined_visitor = true;
     capturing_loop_ = nullptr;
@@ -53,9 +55,11 @@ class LowerAST : public IRVisitor {
     auto backup_block = this->current_block_;
     this->current_block_ = stmt_list;
     auto stmts = make_raw_pointer_list(stmt_list->statements);
+    current_block_depth_++;
     for (auto &stmt : stmts) {
       stmt->accept(this);
     }
+    current_block_depth_--;
     this->current_block_ = backup_block;
   }
 
@@ -83,21 +87,11 @@ class LowerAST : public IRVisitor {
 
     auto new_if = std::make_unique<IfStmt>(stmt->condition->stmt);
 
-    new_if->true_mask = fctx.push_back<AllocaStmt>(PrimitiveType::i32);
-    new_if->false_mask = fctx.push_back<AllocaStmt>(PrimitiveType::i32);
-
-    fctx.push_back<LocalStoreStmt>(new_if->true_mask, stmt->condition->stmt);
-    auto lnot_stmt_ptr = fctx.push_back<UnaryOpStmt>(UnaryOpType::logic_not,
-                                                     stmt->condition->stmt);
-    fctx.push_back<LocalStoreStmt>(new_if->false_mask, lnot_stmt_ptr);
-
     if (stmt->true_statements) {
       new_if->set_true_statements(std::move(stmt->true_statements));
-      new_if->true_statements->mask_var = new_if->true_mask;
     }
     if (stmt->false_statements) {
       new_if->set_false_statements(std::move(stmt->false_statements));
-      new_if->false_statements->mask_var = new_if->false_mask;
     }
     auto pif = new_if.get();
     fctx.push_back(std::move(new_if));
@@ -170,7 +164,6 @@ class LowerAST : public IRVisitor {
     stmt->insert_before_me(std::move(const_stmt));
     stmt->insert_before_me(
         std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
-    new_while->body->mask_var = new_while->mask;
     auto pwhile = new_while.get();
     stmt->parent->replace_with(stmt, std::move(new_while));
     pwhile->accept(this);
@@ -200,9 +193,8 @@ class LowerAST : public IRVisitor {
       auto end = stmt->end;
       flatten_rvalue(begin, &fctx);
       flatten_rvalue(end, &fctx);
-      bool is_good_range_for =
-          capturing_loop_ == nullptr || detected_fors_with_break_.find(stmt) ==
-                                            detected_fors_with_break_.end();
+      bool is_good_range_for = detected_fors_with_break_.find(stmt) ==
+                               detected_fors_with_break_.end();
       // #578: a good range for is a range for that doesn't contains a break
       // statement
       if (is_good_range_for) {
@@ -261,7 +253,6 @@ class LowerAST : public IRVisitor {
         stmt->insert_before_me(std::move(const_stmt));
         stmt->insert_before_me(
             std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
-        new_while->body->mask_var = new_while->mask;
         fctx.push_back(std::move(new_while));
       }
     } else if (stmt->mesh_for) {
@@ -387,10 +378,14 @@ class LowerAST : public IRVisitor {
   }
 
   void visit(FrontendReturnStmt *stmt) override {
-    auto expr = stmt->values[0];
+    auto expr_group = stmt->values;
     auto fctx = make_flatten_ctx();
-    flatten_rvalue(expr, &fctx);
-    fctx.push_back<ReturnStmt>(fctx.back_stmt());
+    std::vector<Stmt *> return_ele;
+    for (auto &x : expr_group.exprs) {
+      flatten_rvalue(x, &fctx);
+      return_ele.push_back(fctx.back_stmt());
+    }
+    fctx.push_back<ReturnStmt>(return_ele);
     stmt->parent->replace_with(stmt, std::move(fctx.stmts));
   }
 

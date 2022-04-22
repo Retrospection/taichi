@@ -67,16 +67,15 @@ class HostDeviceContextBlitter {
     char *const device_base =
         reinterpret_cast<char *>(device_->map(*device_args_buffer_));
 
-#define TO_DEVICE(short_type, type)                    \
-  if (dt->is_primitive(PrimitiveTypeID::short_type)) { \
-    auto d = host_ctx_->get_arg<type>(i);              \
-    reinterpret_cast<type *>(device_ptr)[0] = d;       \
-    break;                                             \
+#define TO_DEVICE(short_type, type)               \
+  if (arg.dtype == PrimitiveTypeID::short_type) { \
+    auto d = host_ctx_->get_arg<type>(i);         \
+    reinterpret_cast<type *>(device_ptr)[0] = d;  \
+    break;                                        \
   }
 
     for (int i = 0; i < ctx_attribs_->args().size(); ++i) {
       const auto &arg = ctx_attribs_->args()[i];
-      const auto dt = arg.dt;
       char *device_ptr = device_base + arg.offset_in_mem;
       do {
         if (arg.is_array) {
@@ -118,13 +117,14 @@ class HostDeviceContextBlitter {
           TO_DEVICE(f64, float64)
         }
         if (device_->get_cap(DeviceCapability::spirv_has_float16)) {
-          if (dt->is_primitive(PrimitiveTypeID::f16)) {
+          if (arg.dtype == PrimitiveTypeID::f16) {
             auto d = fp16_ieee_from_fp32_value(host_ctx_->get_arg<float>(i));
             reinterpret_cast<uint16 *>(device_ptr)[0] = d;
             break;
           }
         }
-        TI_ERROR("Vulkan does not support arg type={}", data_type_name(arg.dt));
+        TI_ERROR("Vulkan does not support arg type={}",
+                 PrimitiveType::get(arg.dtype).to_string());
       } while (0);
     }
 
@@ -183,12 +183,12 @@ class HostDeviceContextBlitter {
     char *const device_base =
         reinterpret_cast<char *>(device_->map(*device_ret_buffer_));
 
-#define TO_HOST(short_type, type)                          \
-  if (dt->is_primitive(PrimitiveTypeID::short_type)) {     \
-    const type d = *reinterpret_cast<type *>(device_ptr);  \
-    host_result_buffer_[i] =                               \
-        taichi_union_cast_with_different_sizes<uint64>(d); \
-    break;                                                 \
+#define TO_HOST(short_type, type, offset)                            \
+  if (dt->is_primitive(PrimitiveTypeID::short_type)) {               \
+    const type d = *(reinterpret_cast<type *>(device_ptr) + offset); \
+    host_result_buffer_[offset] =                                    \
+        taichi_union_cast_with_different_sizes<uint64>(d);           \
+    continue;                                                        \
   }
 
     for (int i = 0; i < ctx_attribs_->rets().size(); ++i) {
@@ -196,43 +196,39 @@ class HostDeviceContextBlitter {
       // *arg* on the host context.
       const auto &ret = ctx_attribs_->rets()[i];
       char *device_ptr = device_base + ret.offset_in_mem;
-      const auto dt = ret.dt;
-      do {
-        if (ret.is_array) {
-          void *host_ptr = host_ctx_->get_arg<void *>(i);
-          std::memcpy(host_ptr, device_ptr, ret.stride);
-          break;
-        }
+      const auto dt = PrimitiveType::get(ret.dtype);
+      const auto num = ret.stride / data_type_size(dt);
+      for (int j = 0; j < num; ++j) {
         if (device_->get_cap(DeviceCapability::spirv_has_int8)) {
-          TO_HOST(i8, int8)
-          TO_HOST(u8, uint8)
+          TO_HOST(i8, int8, j)
+          TO_HOST(u8, uint8, j)
         }
         if (device_->get_cap(DeviceCapability::spirv_has_int16)) {
-          TO_HOST(i16, int16)
-          TO_HOST(u16, uint16)
+          TO_HOST(i16, int16, j)
+          TO_HOST(u16, uint16, j)
         }
-        TO_HOST(i32, int32)
-        TO_HOST(u32, uint32)
-        TO_HOST(f32, float32)
+        TO_HOST(i32, int32, j)
+        TO_HOST(u32, uint32, j)
+        TO_HOST(f32, float32, j)
         if (device_->get_cap(DeviceCapability::spirv_has_int64)) {
-          TO_HOST(i64, int64)
-          TO_HOST(u64, uint64)
+          TO_HOST(i64, int64, j)
+          TO_HOST(u64, uint64, j)
         }
         if (device_->get_cap(DeviceCapability::spirv_has_float64)) {
-          TO_HOST(f64, float64)
+          TO_HOST(f64, float64, j)
         }
         if (device_->get_cap(DeviceCapability::spirv_has_float16)) {
           if (dt->is_primitive(PrimitiveTypeID::f16)) {
             const float d = fp16_ieee_to_fp32_value(
-                *reinterpret_cast<uint16 *>(device_ptr));
-            host_result_buffer_[i] =
+                *reinterpret_cast<uint16 *>(device_ptr) + j);
+            host_result_buffer_[j] =
                 taichi_union_cast_with_different_sizes<uint64>(d);
-            break;
+            continue;
           }
         }
         TI_ERROR("Vulkan does not support return value type={}",
-                 data_type_name(ret.dt));
-      } while (0);
+                 data_type_name(PrimitiveType::get(ret.dtype)));
+      }
     }
 #undef TO_HOST
 
@@ -361,7 +357,7 @@ void CompiledTaichiKernel::generate_command_list(
         if (bind.buffer.type == BufferType::ListGen) {
           // FIXME: properlly support multiple list
           cmdlist->buffer_fill(input_buffers_.at(bind.buffer)->get_ptr(0),
-                               kListGenBufferSize,
+                               kBufferSizeEntireSize,
                                /*data=*/0);
           cmdlist->buffer_barrier(*input_buffers_.at(bind.buffer));
         }
@@ -583,9 +579,9 @@ void VkRuntime::init_nonroot_buffers() {
   Stream *stream = device_->get_compute_stream();
   auto cmdlist = stream->new_command_list();
 
-  cmdlist->buffer_fill(global_tmps_buffer_->get_ptr(0), kGtmpBufferSize,
+  cmdlist->buffer_fill(global_tmps_buffer_->get_ptr(0), kBufferSizeEntireSize,
                        /*data=*/0);
-  cmdlist->buffer_fill(listgen_buffer_->get_ptr(0), kListGenBufferSize,
+  cmdlist->buffer_fill(listgen_buffer_->get_ptr(0), kBufferSizeEntireSize,
                        /*data=*/0);
   stream->submit_synced(cmdlist.get());
 }
@@ -601,9 +597,27 @@ void VkRuntime::add_root_buffer(size_t root_buffer_size) {
            /*export_sharing=*/false, AllocUsage::Storage});
   Stream *stream = device_->get_compute_stream();
   auto cmdlist = stream->new_command_list();
-  cmdlist->buffer_fill(new_buffer->get_ptr(0), root_buffer_size, /*data=*/0);
+  cmdlist->buffer_fill(new_buffer->get_ptr(0), kBufferSizeEntireSize,
+                       /*data=*/0);
   stream->submit_synced(cmdlist.get());
   root_buffers_.push_back(std::move(new_buffer));
+  // cache the root buffer size
+  root_buffers_size_map_[root_buffers_.back().get()] = root_buffer_size;
+}
+
+DeviceAllocation *VkRuntime::get_root_buffer(int id) const {
+  if (id >= root_buffers_.size()) {
+    TI_ERROR("root buffer id {} not found", id);
+  }
+  return root_buffers_[id].get();
+}
+
+size_t VkRuntime::get_root_buffer_size(int id) const {
+  auto it = root_buffers_size_map_.find(root_buffers_[id].get());
+  if (id >= root_buffers_.size() || it == root_buffers_size_map_.end()) {
+    TI_ERROR("root buffer id {} not found", id);
+  }
+  return it->second;
 }
 
 VkRuntime::RegisterParams run_codegen(

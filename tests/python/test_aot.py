@@ -78,18 +78,45 @@ def test_aot_field_range_hint():
             assert range_hint == '64'
 
 
+@test_utils.test(arch=[ti.opengl, ti.vulkan])
+def test_aot_bind_id():
+    density = ti.field(dtype=ti.f32, shape=(8, 8))
+    density1 = ti.ndarray(dtype=ti.f32, shape=(8, 8))
+
+    @ti.kernel
+    def init(x: ti.f32, density1: ti.types.ndarray(field_dim=2,
+                                                   element_shape=())):
+        for i, j in density1:
+            density[i, j] = x
+            density1[i, j] = x + 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        m = ti.aot.Module(ti.lang.impl.current_cfg().arch)
+        m.add_kernel(init)
+        m.save(tmpdir, '')
+        with open(os.path.join(tmpdir, 'metadata.json')) as json_file:
+            res = json.load(json_file)
+            buffer_binds = res['aot_data']['kernels']['init']['tasks'][0][
+                'buffer_binds']
+            for buffer_bind in buffer_binds:
+                if buffer_bind['buffer']['type'] == 0:  # Root
+                    assert buffer_bind['binding'] != -1
+                elif buffer_bind['buffer']['type'] == 2:  # Rets
+                    assert buffer_bind['binding'] != -1
+
+
 @test_utils.test(arch=ti.opengl)
 def test_aot_ndarray_range_hint():
     density = ti.ndarray(dtype=ti.f32, shape=(8, 8))
 
     @ti.kernel
-    def init(density: ti.any_arr()):
+    def init(density: ti.types.ndarray()):
         for i, j in density:
             density[i, j] = 1
 
     with tempfile.TemporaryDirectory() as tmpdir:
         m = ti.aot.Module(ti.opengl)
-        m.add_kernel(init, (density, ))
+        m.add_kernel(init, template_args={'density': density})
         m.save(tmpdir, '')
         with open(os.path.join(tmpdir, 'metadata.json')) as json_file:
             res = json.load(json_file)
@@ -138,7 +165,7 @@ def test_save():
             json.load(json_file)
 
 
-@test_utils.test(arch=ti.opengl)
+@test_utils.test(arch=[ti.opengl, ti.vulkan])
 def test_save_template_kernel():
     density = ti.field(float, shape=(4, 4))
 
@@ -280,9 +307,10 @@ def test_opengl_8_ssbo():
     density6 = ti.ndarray(dtype=ti.f32, shape=(4, 4))
 
     @ti.kernel
-    def init(d: ti.i32, density1: ti.any_arr(), density2: ti.any_arr(),
-             density3: ti.any_arr(), density4: ti.any_arr(),
-             density5: ti.any_arr(), density6: ti.any_arr()):
+    def init(d: ti.i32, density1: ti.types.ndarray(),
+             density2: ti.types.ndarray(), density3: ti.types.ndarray(),
+             density4: ti.types.ndarray(), density5: ti.types.ndarray(),
+             density6: ti.types.ndarray()):
         for i, j in density1:
             density1[i, j] = d + 1
             density2[i, j] = d + 2
@@ -314,10 +342,11 @@ def test_opengl_exceed_max_ssbo():
     density8 = ti.ndarray(dtype=ti.f32, shape=(n, n))
 
     @ti.kernel
-    def init(d: ti.i32, density1: ti.any_arr(), density2: ti.any_arr(),
-             density3: ti.any_arr(), density4: ti.any_arr(),
-             density5: ti.any_arr(), density6: ti.any_arr(),
-             density7: ti.any_arr(), density8: ti.any_arr()):
+    def init(d: ti.i32, density1: ti.types.ndarray(),
+             density2: ti.types.ndarray(), density3: ti.types.ndarray(),
+             density4: ti.types.ndarray(), density5: ti.types.ndarray(),
+             density6: ti.types.ndarray(), density7: ti.types.ndarray(),
+             density8: ti.types.ndarray()):
         for i, j in density1:
             density1[i, j] = d + 1
             density2[i, j] = d + 2
@@ -391,8 +420,8 @@ def test_mpm99_aot():
             for d in ti.static(range(2)):
                 new_sig = sig[d, d]
                 if material[p] == 2:  # Snow
-                    new_sig = min(max(sig[d, d], 1 - 2.5e-2),
-                                  1 + 4.5e-3)  # Plasticity
+                    new_sig = ti.min(ti.max(sig[d, d], 1 - 2.5e-2),
+                                     1 + 4.5e-3)  # Plasticity
                 Jp[p] *= sig[d, d] / new_sig
                 sig[d, d] = new_sig
                 J *= new_sig
@@ -424,9 +453,12 @@ def test_mpm99_aot():
                 grid_v[i, j][1] -= dt * 50  # gravity
                 if i < 3 and grid_v[i, j][0] < 0:
                     grid_v[i, j][0] = 0  # Boundary conditions
-                if i > n_grid - 3 and grid_v[i, j][0] > 0: grid_v[i, j][0] = 0
-                if j < 3 and grid_v[i, j][1] < 0: grid_v[i, j][1] = 0
-                if j > n_grid - 3 and grid_v[i, j][1] > 0: grid_v[i, j][1] = 0
+                if i > n_grid - 3 and grid_v[i, j][0] > 0:
+                    grid_v[i, j][0] = 0
+                if j < 3 and grid_v[i, j][1] < 0:
+                    grid_v[i, j][1] = 0
+                if j > n_grid - 3 and grid_v[i, j][1] > 0:
+                    grid_v[i, j][1] = 0
         for p in x:  # grid to particle (G2P)
             base = (x[p] * inv_dx - 0.5).cast(int)
             fx = x[p] * inv_dx - base.cast(float)
@@ -493,9 +525,11 @@ def test_mpm88_ndarray():
     E = 400
 
     @ti.kernel
-    def substep(x: ti.any_arr(element_dim=1), v: ti.any_arr(element_dim=1),
-                C: ti.any_arr(element_dim=2), J: ti.any_arr(),
-                grid_v: ti.any_arr(element_dim=1), grid_m: ti.any_arr()):
+    def substep(x: ti.types.ndarray(element_dim=1),
+                v: ti.types.ndarray(element_dim=1),
+                C: ti.types.ndarray(element_dim=2), J: ti.types.ndarray(),
+                grid_v: ti.types.ndarray(element_dim=1),
+                grid_m: ti.types.ndarray()):
         for p in x:
             base = (x[p] * inv_dx - 0.5).cast(int)
             fx = x[p] * inv_dx - base.cast(float)
@@ -555,8 +589,34 @@ def test_mpm88_ndarray():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         m = ti.aot.Module(ti.opengl)
-        m.add_kernel(substep, (x, v, C, J, grid_v, grid_m))
+        template_args = {
+            'x': x,
+            'v': v,
+            'C': C,
+            'J': J,
+            'grid_m': grid_m,
+            'grid_v': grid_v,
+        }
+        m.add_kernel(substep, template_args=template_args)
 
         m.save(tmpdir, '')
         with open(os.path.join(tmpdir, 'metadata.json')) as json_file:
             json.load(json_file)
+
+
+@test_utils.test(arch=ti.opengl)
+def test_aot_ndarray_template_mixed():
+    @ti.kernel
+    def run(arr: ti.types.ndarray(), val1: ti.f32, val2: ti.template()):
+        for i in arr:
+            arr[i] = val1 + val2
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        x = ti.ndarray(dtype=ti.f32, shape=16)
+        m = ti.aot.Module(ti.opengl)
+        m.add_kernel(run, template_args={'arr': x, 'val2': 42})
+        m.save(tmpdir, '')
+        with open(os.path.join(tmpdir, 'metadata.json')) as json_file:
+            res = json.load(json_file)
+            args_count = res['aot_data']['kernels']['run']['args_count']
+            assert args_count == 2, res  # `arr` and `val1`
