@@ -3,7 +3,7 @@
 
 #include <string>
 
-#include "taichi/backends/opengl/opengl_api.h"
+#include "taichi/runtime/opengl/opengl_api.h"
 #include "taichi/backends/opengl/opengl_data_types.h"
 #include "taichi/backends/opengl/opengl_kernel_util.h"
 #include "taichi/ir/ir.h"
@@ -31,7 +31,7 @@ namespace shaders {
 
 #define TI_INSIDE_OPENGL_CODEGEN
 #include "taichi/backends/opengl/shaders/atomics_macro_f32.glsl.h"
-#include "taichi/backends/opengl/shaders/runtime.h"
+#include "taichi/runtime/opengl/shaders/runtime.h"
 #include "taichi/backends/opengl/shaders/random.glsl.h"
 #include "taichi/backends/opengl/shaders/fast_pow.glsl.h"
 #include "taichi/backends/opengl/shaders/print.glsl.h"
@@ -122,7 +122,7 @@ class KernelGen : public IRVisitor {
   std::unordered_set<std::string> loaded_args_;
 
   template <typename... Args>
-  void emit(std::string f, Args &&... args) {
+  void emit(std::string f, Args &&...args) {
     line_appender_.append(std::move(f), std::move(args)...);
   }
 
@@ -224,7 +224,7 @@ class KernelGen : public IRVisitor {
         kernel_header += shaders::kOpenGlAtomicF32Source_gtmp;
       }
       std::unordered_set<int> arr_ids;
-      for ([[maybe_unused]] const auto [arr_id, bind_idx] :
+      for ([[maybe_unused]] const auto &[arr_id, bind_idx] :
            used.arr_arg_to_bind_idx) {
         arr_ids.insert(arr_id);
       }
@@ -483,16 +483,17 @@ class KernelGen : public IRVisitor {
     const auto *argload = stmt->base_ptrs[0]->as<ArgLoadStmt>();
     const int arg_id = argload->arg_id;
     const int num_indices = stmt->indices.size();
-    auto element_shape = stmt->element_shape;
+    const auto &element_shape = stmt->element_shape;
     std::vector<std::string> size_var_names;
     std::vector<std::string> element_shape_size_var_names;
-    enum ExternalArrayLayout { layout_AOS = 0, layout_SOA = 1 };
-    auto layout = stmt->element_dim <= 0 ? layout_AOS : layout_SOA;
+
+    const auto layout = stmt->element_dim <= 0 ? ExternalArrayLayout::kAOS
+                                               : ExternalArrayLayout::kSOA;
 
     if (element_shape.size() > 0) {
       int elem_beg = 0;
       int elem_end = 0;
-      if (layout == layout_SOA) {
+      if (layout == ExternalArrayLayout::kSOA) {
         elem_beg = 0;
         elem_end = element_shape.size();
       } else {
@@ -519,7 +520,7 @@ class KernelGen : public IRVisitor {
     // args buffer: 3, 2, 5, 4
     int ind_beg = 0;
     int ind_end = 0;
-    if (layout == layout_SOA) {
+    if (layout == ExternalArrayLayout::kSOA) {
       ind_beg = element_shape.size();
       ind_end = num_indices;
     } else {
@@ -540,7 +541,7 @@ class KernelGen : public IRVisitor {
       size_var_names.push_back(std::move(var_name));
     }
     // Arrange index stride and offsets in correct order
-    if (layout == layout_SOA) {
+    if (layout == ExternalArrayLayout::kSOA) {
       size_var_names.insert(size_var_names.begin(),
                             element_shape_size_var_names.begin(),
                             element_shape_size_var_names.end());

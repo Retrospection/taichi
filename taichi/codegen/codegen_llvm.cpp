@@ -1,13 +1,19 @@
-#ifdef TI_WITH_LLVM
 #include "taichi/codegen/codegen_llvm.h"
-#include "taichi/llvm/llvm_offline_cache.h"
+
+#include <algorithm>
+
+#ifdef TI_WITH_LLVM
+
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Linker/Linker.h"
+#include "taichi/analysis/offline_cache_util.h"
 #include "taichi/ir/statements.h"
+#include "taichi/llvm/launch_arg_info.h"
+#include "taichi/llvm/llvm_offline_cache.h"
+#include "taichi/llvm/llvm_program.h"
 #include "taichi/struct/struct_llvm.h"
 #include "taichi/util/file_sequence_writer.h"
-
-#include "llvm/IR/Module.h"
-#include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/Linker/Linker.h"
 
 TLANG_NAMESPACE_BEGIN
 
@@ -16,7 +22,6 @@ TLANG_NAMESPACE_BEGIN
 // OffloadedTask
 
 OffloadedTask::OffloadedTask(CodeGenLLVM *codegen) : codegen(codegen) {
-  func = nullptr;
 }
 
 void OffloadedTask::begin(const std::string &name) {
@@ -25,19 +30,6 @@ void OffloadedTask::begin(const std::string &name) {
 
 void OffloadedTask::end() {
   codegen->offloaded_tasks.push_back(*this);
-}
-
-void OffloadedTask::operator()(RuntimeContext *context) {
-  TI_ASSERT(func);
-  func(context);
-}
-
-void OffloadedTask::compile() {
-  TI_ASSERT(!func);
-  auto kernel_symbol = codegen->tlctx->lookup_function_pointer(name);
-  TI_ASSERT_INFO(kernel_symbol, "Function not found");
-
-  func = (task_fp_type)kernel_symbol;
 }
 
 // TODO(k-ye): Hide FunctionCreationGuard inside cpp file
@@ -1084,6 +1076,9 @@ llvm::Value *CodeGenLLVM::bitcast_from_u64(llvm::Value *val, DataType type) {
 
 llvm::Value *CodeGenLLVM::bitcast_to_u64(llvm::Value *val, DataType type) {
   auto intermediate_bits = 0;
+  if (type.is_pointer()) {
+    return builder->CreatePtrToInt(val, tlctx->get_data_type<int64>());
+  }
   if (auto cit = type->cast<CustomIntType>()) {
     intermediate_bits = data_type_bits(cit->get_compute_type());
   } else {
@@ -1107,8 +1102,8 @@ void CodeGenLLVM::visit(ArgLoadStmt *stmt) {
 
   llvm::Type *dest_ty = nullptr;
   if (stmt->is_ptr) {
-    dest_ty =
-        llvm::PointerType::get(tlctx->get_data_type(PrimitiveType::i32), 0);
+    dest_ty = llvm::PointerType::get(
+        tlctx->get_data_type(stmt->ret_type.ptr_removed()), 0);
     llvm_val[stmt] = builder->CreateIntToPtr(raw_arg, dest_ty);
   } else {
     llvm_val[stmt] = bitcast_from_u64(raw_arg, stmt->ret_type);
@@ -1212,6 +1207,44 @@ void CodeGenLLVM::visit(SNodeOpStmt *stmt) {
   }
 }
 
+llvm::Value *CodeGenLLVM::optimized_reduction(AtomicOpStmt *stmt) {
+  return nullptr;
+}
+
+llvm::Value *CodeGenLLVM::custom_type_atomic(AtomicOpStmt *stmt) {
+  // TODO(type): support all AtomicOpTypes on custom types
+  if (stmt->op_type != AtomicOpType::add) {
+    return nullptr;
+  }
+
+  auto dst_type = stmt->dest->ret_type->as<PointerType>()->get_pointee_type();
+  if (auto cit = dst_type->cast<CustomIntType>()) {
+    return atomic_add_custom_int(stmt, cit);
+  } else if (auto cft = dst_type->cast<CustomFloatType>()) {
+    return atomic_add_custom_float(stmt, cft);
+  } else {
+    return nullptr;
+  }
+}
+
+llvm::Value *CodeGenLLVM::integral_type_atomic(AtomicOpStmt *stmt) {
+  if (!is_integral(stmt->val->ret_type)) {
+    return nullptr;
+  }
+  std::unordered_map<AtomicOpType, llvm::AtomicRMWInst::BinOp> bin_op;
+  bin_op[AtomicOpType::add] = llvm::AtomicRMWInst::BinOp::Add;
+  bin_op[AtomicOpType::min] = llvm::AtomicRMWInst::BinOp::Min;
+  bin_op[AtomicOpType::max] = llvm::AtomicRMWInst::BinOp::Max;
+
+  bin_op[AtomicOpType::bit_and] = llvm::AtomicRMWInst::BinOp::And;
+  bin_op[AtomicOpType::bit_or] = llvm::AtomicRMWInst::BinOp::Or;
+  bin_op[AtomicOpType::bit_xor] = llvm::AtomicRMWInst::BinOp::Xor;
+  TI_ASSERT(bin_op.find(stmt->op_type) != bin_op.end());
+  return builder->CreateAtomicRMW(bin_op.at(stmt->op_type),
+                                  llvm_val[stmt->dest], llvm_val[stmt->val],
+                                  llvm::AtomicOrdering::SequentiallyConsistent);
+}
+
 llvm::Value *CodeGenLLVM::atomic_op_using_cas(
     llvm::Value *dest,
     llvm::Value *val,
@@ -1247,104 +1280,77 @@ llvm::Value *CodeGenLLVM::atomic_op_using_cas(
   return old_val;
 }
 
+llvm::Value *CodeGenLLVM::real_or_unsigned_type_atomic(AtomicOpStmt *stmt) {
+  if (!stmt->val->ret_type->is<PrimitiveType>()) {
+    return nullptr;
+  }
+  AtomicOpType op = stmt->op_type;
+  if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f16)) {
+    switch (op) {
+      case AtomicOpType::add:
+        return atomic_op_using_cas(
+            llvm_val[stmt->dest], llvm_val[stmt->val],
+            [&](auto v1, auto v2) { return builder->CreateFAdd(v1, v2); });
+      case AtomicOpType::max:
+        return atomic_op_using_cas(
+            llvm_val[stmt->dest], llvm_val[stmt->val],
+            [&](auto v1, auto v2) { return builder->CreateMaxNum(v1, v2); });
+      case AtomicOpType::min:
+        return atomic_op_using_cas(
+            llvm_val[stmt->dest], llvm_val[stmt->val],
+            [&](auto v1, auto v2) { return builder->CreateMinNum(v1, v2); });
+      default:
+        break;
+    }
+  }
+
+  PrimitiveTypeID prim_type = stmt->val->ret_type->cast<PrimitiveType>()->type;
+
+  std::unordered_map<PrimitiveTypeID,
+                     std::unordered_map<AtomicOpType, std::string>>
+      atomics;
+
+  atomics[PrimitiveTypeID::f32][AtomicOpType::add] = "atomic_add_f32";
+  atomics[PrimitiveTypeID::f64][AtomicOpType::add] = "atomic_add_f64";
+  atomics[PrimitiveTypeID::f32][AtomicOpType::min] = "atomic_min_f32";
+  atomics[PrimitiveTypeID::f64][AtomicOpType::min] = "atomic_min_f64";
+  atomics[PrimitiveTypeID::f32][AtomicOpType::max] = "atomic_max_f32";
+  atomics[PrimitiveTypeID::f64][AtomicOpType::max] = "atomic_max_f64";
+  atomics[PrimitiveTypeID::u32][AtomicOpType::min] = "atomic_min_u32";
+  atomics[PrimitiveTypeID::u64][AtomicOpType::min] = "atomic_min_u64";
+  atomics[PrimitiveTypeID::u32][AtomicOpType::max] = "atomic_max_u32";
+  atomics[PrimitiveTypeID::u64][AtomicOpType::max] = "atomic_max_u64";
+
+  if (atomics.find(prim_type) == atomics.end()) {
+    return nullptr;
+  }
+  if (is_integral(stmt->val->ret_type) &&
+      atomics.at(prim_type).find(op) == atomics.at(prim_type).end()) {
+    return nullptr;
+  }
+  TI_ASSERT(atomics.at(prim_type).find(op) != atomics.at(prim_type).end());
+
+  return create_call(atomics.at(prim_type).at(op),
+                     {llvm_val[stmt->dest], llvm_val[stmt->val]});
+}
+
 void CodeGenLLVM::visit(AtomicOpStmt *stmt) {
-  // auto mask = stmt->parent->mask();
-  // TODO: deal with mask when vectorized
-  // TODO(type): support all AtomicOpTypes on custom types
+  bool is_local = stmt->dest->is<AllocaStmt>();
+  if (is_local) {
+    TI_ERROR("Local atomics should have been demoted.");
+  }
   TI_ASSERT(stmt->width() == 1);
   for (int l = 0; l < stmt->width(); l++) {
     llvm::Value *old_value;
-    if (stmt->op_type == AtomicOpType::add) {
-      auto dst_type =
-          stmt->dest->ret_type->as<PointerType>()->get_pointee_type();
-      if (dst_type->is<PrimitiveType>() && is_integral(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::Add, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else if (!dst_type->is<CustomFloatType>() &&
-                 is_real(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::FAdd, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else if (auto cit = dst_type->cast<CustomIntType>()) {
-        old_value = atomic_add_custom_int(stmt, cit);
-      } else if (auto cft = dst_type->cast<CustomFloatType>()) {
-        old_value = atomic_add_custom_float(stmt, cft);
-      } else {
-        TI_NOT_IMPLEMENTED
-      }
-    } else if (stmt->op_type == AtomicOpType::min) {
-      if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::u32)) {
-        old_value = create_call("atomic_min_u32",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::u64)) {
-        old_value = create_call("atomic_min_u64",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else if (is_integral(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::Min, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f16)) {
-        old_value = atomic_op_using_cas(
-            llvm_val[stmt->dest], llvm_val[stmt->val],
-            [&](auto v1, auto v2) { return builder->CreateMinNum(v1, v2); });
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f32)) {
-        old_value = create_call("atomic_min_f32",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f64)) {
-        old_value = create_call("atomic_min_f64",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else {
-        TI_NOT_IMPLEMENTED
-      }
-    } else if (stmt->op_type == AtomicOpType::max) {
-      if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::u32)) {
-        old_value = create_call("atomic_max_u32",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::u64)) {
-        old_value = create_call("atomic_max_u64",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else if (is_integral(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::Max, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f16)) {
-        old_value = atomic_op_using_cas(
-            llvm_val[stmt->dest], llvm_val[stmt->val],
-            [&](auto v1, auto v2) { return builder->CreateMaxNum(v1, v2); });
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f32)) {
-        old_value = create_call("atomic_max_f32",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else if (stmt->val->ret_type->is_primitive(PrimitiveTypeID::f64)) {
-        old_value = create_call("atomic_max_f64",
-                                {llvm_val[stmt->dest], llvm_val[stmt->val]});
-      } else {
-        TI_NOT_IMPLEMENTED
-      }
-    } else if (stmt->op_type == AtomicOpType::bit_and) {
-      if (is_integral(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::And, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else {
-        TI_NOT_IMPLEMENTED
-      }
-    } else if (stmt->op_type == AtomicOpType::bit_or) {
-      if (is_integral(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::Or, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else {
-        TI_NOT_IMPLEMENTED
-      }
-    } else if (stmt->op_type == AtomicOpType::bit_xor) {
-      if (is_integral(stmt->val->ret_type)) {
-        old_value = builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::BinOp::Xor, llvm_val[stmt->dest],
-            llvm_val[stmt->val], llvm::AtomicOrdering::SequentiallyConsistent);
-      } else {
-        TI_NOT_IMPLEMENTED
-      }
+
+    if (llvm::Value *result = optimized_reduction(stmt)) {
+      old_value = result;
+    } else if (llvm::Value *result = custom_type_atomic(stmt)) {
+      old_value = result;
+    } else if (llvm::Value *result = real_or_unsigned_type_atomic(stmt)) {
+      old_value = result;
+    } else if (llvm::Value *result = integral_type_atomic(stmt)) {
+      old_value = result;
     } else {
       TI_NOT_IMPLEMENTED
     }
@@ -1614,6 +1620,23 @@ void CodeGenLLVM::visit(ExternalPtrStmt *stmt) {
   auto arg_id = argload->arg_id;
   int num_indices = stmt->indices.size();
   std::vector<llvm::Value *> sizes(num_indices);
+  const auto &element_shape = stmt->element_shape;
+  enum ExternalArrayLayout { layout_AOS = 0, layout_SOA = 1 };
+  const auto layout = stmt->element_dim <= 0 ? layout_AOS : layout_SOA;
+  // Determine the element shape position inside the indices vector
+  // TODO: change the outer layout in order to remove the element layout
+  // guess work
+  int element_shape_begin = -1;
+  int element_shape_end = -1;
+  if (element_shape.size() > 0) {
+    if (layout == layout_SOA) {
+      element_shape_begin = 0;
+      element_shape_end = element_shape.size();
+    } else {
+      element_shape_begin = num_indices - element_shape.size();
+      element_shape_end = num_indices;
+    }
+  }
 
   for (int i = 0; i < num_indices; i++) {
     auto raw_arg = create_call(
@@ -1628,8 +1651,15 @@ void CodeGenLLVM::visit(ExternalPtrStmt *stmt) {
       llvm::PointerType::get(tlctx->get_data_type(dt), 0));
 
   auto linear_index = tlctx->get_constant(0);
+  int element_shape_idx = 0;
   for (int i = 0; i < num_indices; i++) {
-    linear_index = builder->CreateMul(linear_index, sizes[i]);
+    if (i >= element_shape_begin && i < element_shape_end) {
+      llvm::Value *size_var =
+          tlctx->get_constant(element_shape[element_shape_idx++]);
+      linear_index = builder->CreateMul(linear_index, size_var);
+    } else {
+      linear_index = builder->CreateMul(linear_index, sizes[i]);
+    }
     linear_index = builder->CreateAdd(linear_index, llvm_val[stmt->indices[i]]);
   }
 
@@ -2277,39 +2307,6 @@ void CodeGenLLVM::eliminate_unused_functions() {
       });
 }
 
-FunctionType CodeGenLLVM::compile_module_to_executable() {
-  TI_AUTO_PROF
-
-  tlctx->add_module(std::move(module));
-
-  for (auto &task : offloaded_tasks) {
-    task.compile();
-  }
-  auto offloaded_tasks_local = offloaded_tasks;
-  auto kernel_name_ = kernel_name;
-  return [offloaded_tasks_local, kernel_name_,
-          kernel = this->kernel](RuntimeContext &context) {
-    TI_TRACE("Launching kernel {}", kernel_name_);
-    auto args = kernel->args;
-    // For taichi ndarrays, context.args saves pointer to its
-    // |DeviceAllocation|, CPU backend actually want to use the raw ptr here.
-    for (int i = 0; i < (int)args.size(); i++) {
-      if (args[i].is_array && context.is_device_allocation[i] &&
-          args[i].size > 0) {
-        DeviceAllocation *ptr =
-            static_cast<DeviceAllocation *>(context.get_arg<void *>(i));
-        uint64 host_ptr = (uint64)kernel->program->get_llvm_program_impl()
-                              ->get_ndarray_alloc_info_ptr(*ptr);
-        context.set_arg(i, host_ptr);
-        context.set_device_allocation(i, false);
-      }
-    }
-    for (auto task : offloaded_tasks_local) {
-      task(&context);
-    }
-  };
-}
-
 FunctionCreationGuard CodeGenLLVM::get_function_creation_guard(
     std::vector<llvm::Type *> argument_types) {
   return FunctionCreationGuard(this, argument_types);
@@ -2383,33 +2380,19 @@ void CodeGenLLVM::emit_to_module() {
   ir->accept(this);
 }
 
-FunctionType CodeGenLLVM::gen() {
+CodeGenLLVM::CompiledData CodeGenLLVM::run_compilation() {
   bool needs_cache = false;
   const auto &config = prog->config;
   std::string kernel_key;
-  if (config.offline_cache && this->supports_offline_cache() &&
-      !kernel->is_evaluator) {
+  if (config.offline_cache && !config.async_mode &&
+      this->supports_offline_cache() && !kernel->is_evaluator) {
     kernel_key = get_hashed_offline_cache_key(&kernel->program->config, kernel);
-
-    LlvmOfflineCacheFileReader reader(config.offline_cache_file_path);
-    LlvmOfflineCache::KernelCacheData cache_data;
-    auto *tlctx =
-        this->prog->get_llvm_program_impl()->get_llvm_context(config.arch);
-    auto &llvm_ctx = *tlctx->get_this_thread_context();
-
-    if (reader.get_kernel_cache(cache_data, kernel_key, llvm_ctx)) {
-      this->module = std::move(cache_data.owned_module);
-      for (auto &task : cache_data.offloaded_task_list) {
-        auto &t = this->offloaded_tasks.emplace_back(this);
-        t.name = std::move(task.name);
-        t.block_dim = task.block_dim;
-        t.grid_dim = task.grid_dim;
-      }
-      kernel->set_from_offline_cache();
-      return compile_module_to_executable();
-    } else {
-      needs_cache = true;
+    CompiledData res;
+    const bool ok = maybe_read_compilation_from_cache(kernel_key, &res);
+    if (ok) {
+      return res;
     }
+    needs_cache = true;
   }
 
   if (!kernel->lowered()) {
@@ -2420,7 +2403,50 @@ FunctionType CodeGenLLVM::gen() {
   if (needs_cache) {
     cache_module(kernel_key);
   }
-  return compile_module_to_executable();
+  CompiledData res;
+  res.offloaded_tasks = std::move(this->offloaded_tasks);
+  res.llvm_module = std::move(this->module);
+  return res;
+}
+
+bool CodeGenLLVM::maybe_read_compilation_from_cache(
+    const std::string &kernel_key,
+    CompiledData *data) {
+  const auto &config = prog->config;
+  auto reader =
+      LlvmOfflineCacheFileReader::make(config.offline_cache_file_path);
+  if (!reader) {
+    return false;
+  }
+
+  LlvmOfflineCache::KernelCacheData cache_data;
+  auto *tlctx =
+      this->prog->get_llvm_program_impl()->get_llvm_context(config.arch);
+  auto &llvm_ctx = *tlctx->get_this_thread_context();
+
+  if (!reader->get_kernel_cache(cache_data, kernel_key, llvm_ctx)) {
+    return false;
+  }
+  this->module = std::move(cache_data.owned_module);
+  for (auto &task : cache_data.offloaded_task_list) {
+    auto &t = this->offloaded_tasks.emplace_back(this);
+    t.name = std::move(task.name);
+    t.block_dim = task.block_dim;
+    t.grid_dim = task.grid_dim;
+  }
+  kernel->set_from_offline_cache();
+  data->offloaded_tasks = std::move(this->offloaded_tasks);
+  data->llvm_module = std::move(this->module);
+  return true;
+}
+
+FunctionType CodeGenLLVM::gen() {
+  auto compiled_res = run_compilation();
+
+  ModuleToFunctionConverter converter{tlctx,
+                                      kernel->program->get_llvm_program_impl()};
+  return converter.convert(kernel, std::move(compiled_res.llvm_module),
+                           std::move(compiled_res.offloaded_tasks));
 }
 
 llvm::Value *CodeGenLLVM::create_xlogue(std::unique_ptr<Block> &block) {
@@ -2455,6 +2481,10 @@ llvm::Value *CodeGenLLVM::create_mesh_xlogue(std::unique_ptr<Block> &block) {
   }
 
   return xlogue;
+}
+
+void CodeGenLLVM::visit(ReferenceStmt *stmt) {
+  llvm_val[stmt] = llvm_val[stmt->var];
 }
 
 void CodeGenLLVM::visit(FuncCallStmt *stmt) {
@@ -2496,8 +2526,61 @@ void CodeGenLLVM::cache_module(const std::string &kernel_key) {
     task_cache.grid_dim = task.grid_dim;
   }
   prog->get_llvm_program_impl()->cache_kernel(kernel_key, this->module.get(),
+                                              infer_launch_args(kernel),
                                               std::move(offloaded_task_list));
 }
+
+ModuleToFunctionConverter::ModuleToFunctionConverter(TaichiLLVMContext *tlctx,
+                                                     LlvmProgramImpl *program)
+    : tlctx_(tlctx), program_(program) {
+}
+
+FunctionType ModuleToFunctionConverter::convert(
+    const std::string &kernel_name,
+    const std::vector<LlvmLaunchArgInfo> &args,
+    std::unique_ptr<llvm::Module> mod,
+    std::vector<OffloadedTask> &&tasks) const {
+  tlctx_->add_module(std::move(mod));
+
+  using TaskFunc = int32 (*)(void *);
+  std::vector<TaskFunc> task_funcs;
+  task_funcs.reserve(tasks.size());
+  for (auto &task : tasks) {
+    auto *func_ptr = tlctx_->lookup_function_pointer(task.name);
+    TI_ASSERT_INFO(func_ptr, "Offloaded task function {} not found", task.name);
+    task_funcs.push_back((TaskFunc)(func_ptr));
+  }
+  // Do NOT capture `this`...
+  return [program = this->program_, args, kernel_name,
+          task_funcs](RuntimeContext &context) {
+    TI_TRACE("Launching kernel {}", kernel_name);
+    // For taichi ndarrays, context.args saves pointer to its
+    // |DeviceAllocation|, CPU backend actually want to use the raw ptr here.
+    for (int i = 0; i < (int)args.size(); i++) {
+      if (args[i].is_array && context.is_device_allocations[i] &&
+          context.array_runtime_sizes[i] > 0) {
+        DeviceAllocation *ptr =
+            static_cast<DeviceAllocation *>(context.get_arg<void *>(i));
+        uint64 host_ptr = (uint64)program->get_ndarray_alloc_info_ptr(*ptr);
+        context.set_arg(i, host_ptr);
+        context.set_array_is_device_allocation(i,
+                                               /*is_device_allocation=*/false);
+      }
+    }
+    for (auto task : task_funcs) {
+      task(&context);
+    }
+  };
+}
+
+FunctionType ModuleToFunctionConverter::convert(
+    const Kernel *kernel,
+    std::unique_ptr<llvm::Module> mod,
+    std::vector<OffloadedTask> &&tasks) const {
+  return convert(kernel->name, infer_launch_args(kernel), std::move(mod),
+                 std::move(tasks));
+}
+
 TLANG_NAMESPACE_END
 
 #endif  // #ifdef TI_WITH_LLVM

@@ -1,7 +1,8 @@
 #include "taichi/backends/vulkan/vulkan_program.h"
 
-#include "taichi/backends/vulkan/aot_module_builder_impl.h"
-#include "taichi/backends/vulkan/snode_tree_manager.h"
+#include "taichi/runtime/gfx/aot_module_builder_impl.h"
+#include "taichi/runtime/gfx/snode_tree_manager.h"
+#include "taichi/runtime/gfx/aot_module_loader_impl.h"
 
 #if !defined(ANDROID) && !defined(TI_EMSCRIPTENED)
 #include "GLFW/glfw3.h"
@@ -68,11 +69,11 @@ VulkanProgramImpl::VulkanProgramImpl(CompileConfig &config)
 }
 
 FunctionType compile_to_executable(Kernel *kernel,
-                                   VkRuntime *runtime,
-                                   SNodeTreeManager *snode_tree_mgr) {
+                                   gfx::GfxRuntime *runtime,
+                                   gfx::SNodeTreeManager *snode_tree_mgr) {
   auto handle = runtime->register_taichi_kernel(
-      std::move(run_codegen(kernel, runtime->get_ti_device(),
-                            snode_tree_mgr->get_compiled_structs())));
+      gfx::run_codegen(kernel, runtime->get_ti_device(),
+                       snode_tree_mgr->get_compiled_structs()));
   return [runtime, handle](RuntimeContext &ctx) {
     runtime->launch_kernel(handle, &ctx);
   };
@@ -143,54 +144,58 @@ void VulkanProgramImpl::materialize_runtime(MemoryPool *memory_pool,
 
   embedded_device_ = std::make_unique<VulkanDeviceCreator>(evd_params);
 
-  vulkan::VkRuntime::Params params;
+  gfx::GfxRuntime::Params params;
   params.host_result_buffer = *result_buffer_ptr;
   params.device = embedded_device_->device();
-  vulkan_runtime_ = std::make_unique<vulkan::VkRuntime>(std::move(params));
+  vulkan_runtime_ = std::make_unique<gfx::GfxRuntime>(std::move(params));
   snode_tree_mgr_ =
-      std::make_unique<vulkan::SNodeTreeManager>(vulkan_runtime_.get());
+      std::make_unique<gfx::SNodeTreeManager>(vulkan_runtime_.get());
 }
 
-void VulkanProgramImpl::compile_snode_tree_types(
-    SNodeTree *tree,
-    std::vector<std::unique_ptr<SNodeTree>> &snode_trees) {
+void VulkanProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
   if (vulkan_runtime_) {
     snode_tree_mgr_->materialize_snode_tree(tree);
   } else {
-    CompiledSNodeStructs compiled_structs =
-        vulkan::compile_snode_structs(*tree->root());
+    gfx::CompiledSNodeStructs compiled_structs =
+        gfx::compile_snode_structs(*tree->root());
     aot_compiled_snode_structs_.push_back(compiled_structs);
   }
 }
 
-void VulkanProgramImpl::materialize_snode_tree(
-    SNodeTree *tree,
-    std::vector<std::unique_ptr<SNodeTree>> &,
-    uint64 *result_buffer) {
+void VulkanProgramImpl::materialize_snode_tree(SNodeTree *tree,
+                                               uint64 *result_buffer) {
   snode_tree_mgr_->materialize_snode_tree(tree);
 }
 
 std::unique_ptr<AotModuleBuilder> VulkanProgramImpl::make_aot_module_builder() {
   if (vulkan_runtime_) {
-    return std::make_unique<AotModuleBuilderImpl>(
-        snode_tree_mgr_->get_compiled_structs());
+    return std::make_unique<gfx::AotModuleBuilderImpl>(
+        snode_tree_mgr_->get_compiled_structs(), Arch::vulkan);
   } else {
-    return std::make_unique<AotModuleBuilderImpl>(aot_compiled_snode_structs_);
+    return std::make_unique<gfx::AotModuleBuilderImpl>(
+        aot_compiled_snode_structs_, Arch::vulkan);
   }
 }
 
 DeviceAllocation VulkanProgramImpl::allocate_memory_ndarray(
     std::size_t alloc_size,
     uint64 *result_buffer) {
-  auto &ndarray =
-      ref_ndarry_.emplace_back(get_compute_device()->allocate_memory_unique(
-          {alloc_size, /*host_write=*/false, /*host_read=*/false,
-           /*export_sharing=*/false}));
-  return *ndarray;
+  return get_compute_device()->allocate_memory(
+      {alloc_size, /*host_write=*/false, /*host_read=*/false,
+       /*export_sharing=*/false});
+}
+
+std::unique_ptr<aot::Kernel> VulkanProgramImpl::make_aot_kernel(
+    Kernel &kernel) {
+  spirv::lower(&kernel);
+  std::vector<gfx::CompiledSNodeStructs> compiled_structs;
+  gfx::GfxRuntime::RegisterParams kparams =
+      gfx::run_codegen(&kernel, get_compute_device(), compiled_structs);
+  return std::make_unique<gfx::KernelImpl>(vulkan_runtime_.get(),
+                                           std::move(kparams));
 }
 
 VulkanProgramImpl::~VulkanProgramImpl() {
-  ref_ndarry_.clear();
   vulkan_runtime_.reset();
   embedded_device_.reset();
 }

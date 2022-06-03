@@ -276,13 +276,19 @@ class ArgLoadExpression : public Expression {
  public:
   int arg_id;
   DataType dt;
+  bool is_ptr;
 
-  ArgLoadExpression(int arg_id, DataType dt) : arg_id(arg_id), dt(dt) {
+  ArgLoadExpression(int arg_id, DataType dt, bool is_ptr = false)
+      : arg_id(arg_id), dt(dt), is_ptr(is_ptr) {
   }
 
   void type_check(CompileConfig *config) override;
 
   void flatten(FlattenContext *ctx) override;
+
+  bool is_lvalue() const override {
+    return is_ptr;
+  }
 
   TI_DEFINE_ACCEPT_FOR_EXPRESSION
 };
@@ -433,6 +439,7 @@ class GlobalVariableExpression : public Expression {
   TypedConstant ambient_value;
   bool is_primal{true};
   Expr adjoint;
+  Expr dual;
 
   GlobalVariableExpression(DataType dt, const Identifier &ident)
       : ident(ident), dt(dt) {
@@ -457,16 +464,11 @@ class GlobalVariableExpression : public Expression {
 
 class GlobalPtrExpression : public Expression {
  public:
-  SNode *snode{nullptr};
   Expr var;
   ExprGroup indices;
 
   GlobalPtrExpression(const Expr &var, const ExprGroup &indices)
       : var(var), indices(indices) {
-  }
-
-  GlobalPtrExpression(SNode *snode, const ExprGroup &indices)
-      : snode(snode), indices(indices) {
   }
 
   void type_check(CompileConfig *config) override;
@@ -720,6 +722,19 @@ class MeshIndexConversionExpression : public Expression {
                                 const Expr idx,
                                 mesh::ConvType conv_type)
       : mesh(mesh), idx_type(idx_type), idx(idx), conv_type(conv_type) {
+  }
+
+  void flatten(FlattenContext *ctx) override;
+
+  TI_DEFINE_ACCEPT_FOR_EXPRESSION
+};
+
+class ReferenceExpression : public Expression {
+ public:
+  Expr var;
+  void type_check(CompileConfig *config) override;
+
+  ReferenceExpression(const Expr &expr) : var(expr) {
   }
 
   void flatten(FlattenContext *ctx) override;
